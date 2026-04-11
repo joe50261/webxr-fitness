@@ -299,17 +299,6 @@ for (let i = 0; i < 2; i++) {
   controller.add(glove);
   glovesMeshes.push(glove);
 
-  // Punch direction indicator on glove — shows expected punch type
-  const gloveArrowGeo = new THREE.ConeGeometry(0.02, 0.06, 4);
-  const gloveArrowMat = new THREE.MeshBasicMaterial({
-    color: 0xffffff, transparent: true, opacity: 0.6,
-  });
-  const gloveArrow = new THREE.Mesh(gloveArrowGeo, gloveArrowMat);
-  gloveArrow.position.set(0, 0, -0.1);
-  gloveArrow.visible = false;
-  controller.add(gloveArrow);
-  controller.userData.gloveArrow = gloveArrow;
-
   // Trail line
   const trailGeo = new THREE.BufferGeometry();
   const trailPositions = new Float32Array(30 * 3); // 30 points
@@ -343,63 +332,46 @@ const PUNCH_TYPES = {
 const targetPool = [];
 const TARGET_POOL_SIZE = 20;
 
-// Reusable geometry/material
-const targetGeo = new THREE.OctahedronGeometry(CONFIG.TARGET_RADIUS, 1);
-const targetOuterGeo = new THREE.OctahedronGeometry(CONFIG.TARGET_RADIUS * 1.4, 1);
+// Target geometry — flat disc, orientation IS the instruction
+const targetGeo = new THREE.CircleGeometry(CONFIG.TARGET_RADIUS, 24);
+const targetRingGeo = new THREE.RingGeometry(
+  CONFIG.TARGET_RADIUS * 0.85, CONFIG.TARGET_RADIUS, 24
+);
 
-// Direction arrow — cone pointing in expected punch direction
-const arrowGeo = new THREE.ConeGeometry(0.04, 0.12, 6);
-const arrowMat = new THREE.MeshBasicMaterial({
-  color: 0xffffff, transparent: true, opacity: 0.8,
-});
-
-// Shared materials per color variant (left / right / neutral)
-function makeTargetInnerMat(color) {
+// Shared materials (left=blue, right=red)
+function makeTargetMat(color) {
   return new THREE.MeshStandardMaterial({
-    color, emissive: color, emissiveIntensity: 0.5, transparent: true, opacity: 0.9,
+    color, emissive: color, emissiveIntensity: 0.5,
+    transparent: true, opacity: 0.9, side: THREE.DoubleSide,
   });
 }
-function makeTargetOuterMat(color) {
+function makeTargetRingMat(color) {
   return new THREE.MeshBasicMaterial({
-    color, wireframe: true, transparent: true, opacity: 0.3,
+    color: 0xffffff, transparent: true, opacity: 0.4,
+    side: THREE.DoubleSide,
   });
 }
 const targetMats = {
-  left:    { inner: makeTargetInnerMat(CONFIG.LEFT_COLOR),  outer: makeTargetOuterMat(CONFIG.LEFT_COLOR) },
-  right:   { inner: makeTargetInnerMat(CONFIG.RIGHT_COLOR), outer: makeTargetOuterMat(CONFIG.RIGHT_COLOR) },
-  neutral: { inner: makeTargetInnerMat(0xffd700),           outer: makeTargetOuterMat(0xffd700) },
+  left:  { disc: makeTargetMat(CONFIG.LEFT_COLOR),  ring: makeTargetRingMat(CONFIG.LEFT_COLOR) },
+  right: { disc: makeTargetMat(CONFIG.RIGHT_COLOR), ring: makeTargetRingMat(CONFIG.RIGHT_COLOR) },
 };
 
 function createTarget() {
   const group = new THREE.Group();
 
-  const inner = new THREE.Mesh(targetGeo, targetMats.left.inner);
-  group.add(inner);
-  group.userData.inner = inner;
+  // Solid disc — colored face is the "hit here" surface
+  const disc = new THREE.Mesh(targetGeo, targetMats.left.disc);
+  group.add(disc);
+  group.userData.disc = disc;
 
-  const outer = new THREE.Mesh(targetOuterGeo, targetMats.left.outer);
-  group.add(outer);
-  group.userData.outer = outer;
-
-  // Direction arrow — rotated per punch type on spawn
-  const arrow = new THREE.Mesh(arrowGeo, arrowMat);
-  arrow.position.set(0, 0, 0);
-  group.add(arrow);
-  group.userData.arrow = arrow;
+  // Thin ring border for visibility
+  const ring = new THREE.Mesh(targetRingGeo, targetMats.left.ring);
+  group.add(ring);
+  group.userData.ring = ring;
 
   group.visible = false;
   scene.add(group);
   return group;
-}
-
-// Orient the arrow mesh to point along a direction vector
-function orientArrow(arrow, dir) {
-  // ConeGeometry points along +Y by default; rotate to match dir
-  const up = new THREE.Vector3(0, 1, 0);
-  const q = new THREE.Quaternion().setFromUnitVectors(up, dir.clone().normalize());
-  arrow.quaternion.copy(q);
-  // Offset arrow tip to sit on target surface
-  arrow.position.copy(dir).normalize().multiplyScalar(CONFIG.TARGET_RADIUS * 1.6);
 }
 
 // Pre-populate pool
@@ -431,9 +403,9 @@ function spawnTarget() {
 
   for (const pos of pattern.positions) {
     const target = getTarget();
-    const variant = pos.hand === 0 ? 'left' : pos.hand === 1 ? 'right' : 'neutral';
-    target.userData.inner.material = targetMats[variant].inner;
-    target.userData.outer.material = targetMats[variant].outer;
+    const variant = pos.hand === 0 ? 'left' : 'right';
+    target.userData.disc.material = targetMats[variant].disc;
+    target.userData.ring.material = targetMats[variant].ring;
     target.userData.hand = pos.hand;
     target.userData.hit = false;
     target.userData.spawnTime = performance.now();
@@ -443,8 +415,13 @@ function spawnTarget() {
     target.userData.punchType = pos.punch || 'jab';
     target.userData.expectedDir = punchType.dir.clone();
 
-    // Orient direction arrow
-    orientArrow(target.userData.arrow, punchType.dir);
+    // Orient disc so its face normal = expected punch direction
+    // Player sees the face → "punch INTO this surface"
+    const dir = punchType.dir;
+    target.quaternion.setFromUnitVectors(
+      new THREE.Vector3(0, 0, 1),  // CircleGeometry default normal
+      dir.clone().negate()          // face toward incoming punch
+    );
 
     // Position: fixed from pattern
     target.position.set(pos.x, pos.y, -CONFIG.SPAWN_DISTANCE);
@@ -1101,26 +1078,6 @@ function gameLoop(timestamp, frame) {
       if (glove.scale.x < 1.01) glove.scale.setScalar(1.0);
     }
 
-    // Glove direction indicator — show nearest target's punch direction
-    const ga = ctrl.userData.gloveArrow;
-    if (ga) {
-      let nearest = null, nearestDist = Infinity;
-      for (const t of state.targets) {
-        if (t.userData.hit || !t.visible) continue;
-        if (t.userData.hand !== -1 && t.userData.hand !== i) continue;
-        const d = t.position.z;
-        if (d > -2.0 && d < nearestDist) { nearest = t; nearestDist = d; }
-      }
-      if (nearest && nearest.userData.expectedDir) {
-        ga.visible = true;
-        const dir = nearest.userData.expectedDir;
-        const upV = new THREE.Vector3(0, 1, 0);
-        ga.quaternion.setFromUnitVectors(upV, dir);
-        ga.position.copy(dir).multiplyScalar(0.12);
-      } else {
-        ga.visible = false;
-      }
-    }
   }
 
   // ── Update targets ──
@@ -1139,10 +1096,6 @@ function gameLoop(timestamp, frame) {
       target.scale.addScalar(delta * 5);
       if (target.scale.x > 1) target.scale.setScalar(1);
     }
-
-    // Rotate for visual flair
-    target.rotation.y += delta * 2;
-    target.rotation.x += delta * 1.5;
 
     // Collision detection with controllers (check BEFORE miss)
     // Early exit: skip expensive distance calcs if target is still far away
