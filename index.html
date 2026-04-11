@@ -360,19 +360,10 @@ function getTarget() {
   return t;
 }
 
-// Spawn patterns — inspired by combat moves
+// Spawn patterns — aligned with anchor points
 const SPAWN_PATTERNS = [
-  // [x, y] offsets from center, hand preference (0=left, 1=right, -1=either)
-  { positions: [{ x: -0.5, y: 1.3, hand: 0 }], name: 'left_jab' },
-  { positions: [{ x: 0.5, y: 1.3, hand: 1 }], name: 'right_jab' },
-  { positions: [{ x: -0.5, y: 1.3, hand: 0 }, { x: 0.5, y: 1.3, hand: 1 }], name: 'double_jab' },
-  { positions: [{ x: -0.3, y: 1.6, hand: 0 }], name: 'left_hook_high' },
-  { positions: [{ x: 0.3, y: 1.6, hand: 1 }], name: 'right_hook_high' },
-  { positions: [{ x: -0.6, y: 1.0, hand: 0 }], name: 'left_body' },
-  { positions: [{ x: 0.6, y: 1.0, hand: 1 }], name: 'right_body' },
-  { positions: [{ x: 0, y: 1.8, hand: -1 }], name: 'uppercut_center' },
-  { positions: [{ x: -0.7, y: 1.3, hand: 0 }, { x: 0.7, y: 1.3, hand: 1 }], name: 'wide_combo' },
-  { positions: [{ x: -0.3, y: 1.0, hand: 0 }, { x: 0.3, y: 1.6, hand: 1 }], name: 'cross_combo' },
+  { positions: [{ x: -0.5, y: 1.3, hand: 0 }], name: 'left' },
+  { positions: [{ x: 0.5, y: 1.3, hand: 1 }], name: 'right' },
 ];
 
 function spawnTarget() {
