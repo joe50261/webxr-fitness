@@ -558,22 +558,12 @@ const anchorMat = new THREE.MeshBasicMaterial({
 });
 
 function createPermanentAnchors() {
-  // Collect unique positions from all patterns
-  const seen = new Set();
-  for (const pattern of SPAWN_PATTERNS) {
-    for (const pos of pattern.positions) {
-      const key = `${pos.x},${pos.y}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      const z = CONFIG.IDEAL_HIT_Z;
-      const anchor = new THREE.Mesh(anchorRingGeo, anchorMat);
-      anchor.position.set(pos.x, pos.y, z);
-      anchor.lookAt(pos.x, pos.y, z + 1);
-      anchor.scale.setScalar(CONFIG.ANCHOR_SIZE);
-      scene.add(anchor);
-    }
-  }
+  const z = CONFIG.IDEAL_HIT_Z;
+  const anchor = new THREE.Mesh(anchorRingGeo, anchorMat);
+  anchor.position.set(0, 1.3, z);
+  anchor.lookAt(0, 1.3, z + 1);
+  anchor.scale.setScalar(CONFIG.ANCHOR_SIZE);
+  scene.add(anchor);
 }
 createPermanentAnchors();
 
