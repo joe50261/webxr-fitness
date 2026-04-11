@@ -51,7 +51,7 @@
   <p>WebXR 6DoF Rhythm Fighting</p>
   <button id="enter-vr" disabled>Checking WebXR...</button>
   <div id="status"></div>
-  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.5.0-calibration</div>
+  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.5.1-hitline</div>
 </div>
 
 <div id="debug"></div>
@@ -494,7 +494,7 @@ function showFeedback(position, label, color) {
   state.feedbacks.push(sprite);
 }
 
-function onHit(target, controllerIndex, distance) {
+function onHit(target, controllerIndex, distance, hitPos) {
   const punchVel = state.controllerVelocities[controllerIndex];
   const expectedDir = target.userData.expectedDir || null;
   const result = evaluateHit(distance, punchVel, expectedDir);
@@ -524,10 +524,10 @@ function onHit(target, controllerIndex, distance) {
     }
   }
 
-  // Impact line — from hit position toward anchor, shows offset direction
+  // Line from anchor to controller position at closest approach
   const handColor = controllerIndex === 0 ? CONFIG.LEFT_COLOR : CONFIG.RIGHT_COLOR;
   const anchor = controllerIndex === 0 ? calibration.left : calibration.right;
-  createImpactMark(target.position.clone(), anchor, handColor, result.label);
+  createImpactMark(hitPos, anchor, handColor, result.label);
 
   // Show feedback text
   const feedbackPos = target.position.clone();
@@ -546,14 +546,7 @@ function onMiss(target) {
   state.combo = 0;
   state.hits.miss++;
 
-  const missHandColor = target.userData.hand === 0 ? CONFIG.LEFT_COLOR :
-                        target.userData.hand === 1 ? CONFIG.RIGHT_COLOR : 0x666666;
-  const anchor = target.userData.hand === 0 ? calibration.left : calibration.right;
-  createMissMark(target.position, anchor, missHandColor);
-
-  const feedbackPos = target.position.clone();
-  feedbackPos.y += 0.2;
-  showFeedback(feedbackPos, 'MISS', CONFIG.MISS_COLOR);
+  showFeedback(target.position.clone(), 'MISS', CONFIG.MISS_COLOR);
   target.visible = false;
 }
 
@@ -588,35 +581,6 @@ function createImpactMark(hitPos, anchorPos, color, hitQuality) {
     fadeTime: CONFIG.INK_RESIDUE_FADE_TIME * 1000,
     hitQuality: hitQuality,
     baseOpacity: qualityOpacity,
-  };
-
-  scene.add(line);
-  state.inkResidues.push(line);
-}
-
-// Miss line — anchor to miss position, very faint
-function createMissMark(missPos, anchorPos, handColor) {
-  while (state.inkResidues.length >= CONFIG.MAX_RESIDUE_MARKS) {
-    const oldest = state.inkResidues.shift();
-    scene.remove(oldest);
-    oldest.material.dispose();
-  }
-
-  const geo = new THREE.BufferGeometry().setFromPoints([
-    anchorPos.clone(),
-    missPos.clone(),
-  ]);
-  const mat = new THREE.LineBasicMaterial({
-    color: handColor, transparent: true, opacity: 0.15,
-  });
-  const line = new THREE.Line(geo, mat);
-
-  line.userData = {
-    spawnTime: performance.now(),
-    lifetime: CONFIG.INK_RESIDUE_LIFETIME * 1000,
-    fadeTime: CONFIG.INK_RESIDUE_FADE_TIME * 1000,
-    hitQuality: 'MISS',
-    baseOpacity: 0.15,
   };
 
   scene.add(line);
@@ -1015,11 +979,15 @@ function gameLoop(timestamp, frame) {
       if (dist < CONFIG.HIT_DISTANCE && speed > CONFIG.MIN_PUNCH_VELOCITY) {
         if (!tracking) {
           // Enter hit zone — start tracking closest approach
-          target.userData.tracking = { controller: c, minDist: dist, frames: 0 };
+          target.userData.tracking = {
+            controller: c, minDist: dist, frames: 0,
+            hitPos: ctrlWorldPos[c].clone(),
+          };
         } else if (tracking.controller === c) {
           // Still in zone — update minimum distance
           if (dist < tracking.minDist) {
             tracking.minDist = dist;
+            tracking.hitPos.copy(ctrlWorldPos[c]);
             tracking.frames = 0;
           } else {
             tracking.frames++;
@@ -1028,7 +996,7 @@ function gameLoop(timestamp, frame) {
           if (tracking.frames >= 2) {
             target.userData.hit = true;
             target.visible = false;
-            onHit(target, c, tracking.minDist);
+            onHit(target, c, tracking.minDist, tracking.hitPos);
             playHitSound();
             state.targets.splice(i, 1);
             break;
@@ -1038,7 +1006,7 @@ function gameLoop(timestamp, frame) {
         // Exited hit zone — finalize with best distance achieved
         target.userData.hit = true;
         target.visible = false;
-        onHit(target, c, tracking.minDist);
+        onHit(target, c, tracking.minDist, tracking.hitPos);
         playHitSound();
         state.targets.splice(i, 1);
         break;
