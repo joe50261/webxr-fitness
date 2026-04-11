@@ -525,9 +525,10 @@ function onHit(target, controllerIndex, distance) {
     }
   }
 
-  // Impact mark — hand color (blue/red), opacity encodes precision
+  // Impact line — from hit position toward anchor, shows offset direction
   const handColor = controllerIndex === 0 ? CONFIG.LEFT_COLOR : CONFIG.RIGHT_COLOR;
-  createImpactMark(target.position.clone(), punchVel, handColor, result.label);
+  const anchor = controllerIndex === 0 ? calibration.left : calibration.right;
+  createImpactMark(target.position.clone(), anchor, handColor, result.label);
 
   // Show feedback text
   const feedbackPos = target.position.clone();
@@ -563,8 +564,8 @@ function onMiss(target) {
 // Thin line geometry — 1 unit tall, very narrow
 const inkLineGeo = new THREE.PlaneGeometry(0.01, 1);
 
-// Create a single thin line mark at hit position
-function createImpactMark(position, punchVelocity, color, hitQuality) {
+// Create a thin line from hit position toward anchor — shows "you were off this way"
+function createImpactMark(position, anchorPos, color, hitQuality) {
   while (state.inkResidues.length >= CONFIG.MAX_RESIDUE_MARKS) {
     const oldest = state.inkResidues.shift();
     scene.remove(oldest);
@@ -584,17 +585,21 @@ function createImpactMark(position, punchVelocity, color, hitQuality) {
   const line = new THREE.Mesh(inkLineGeo, mat);
   line.position.copy(position);
 
-  // Orient line along punch direction, face toward player
-  // Line lies in sagittal plane for jabs, frontal for hooks
-  const punchSpeed = punchVelocity.length();
-  const lineLength = CONFIG.INK_SPLAT_BASE_SIZE * (0.5 + Math.min(punchSpeed / 3, 2.0));
+  // Offset vector from hit position to anchor (ideal position)
+  const dx = anchorPos.x - position.x;
+  const dy = anchorPos.y - position.y;
+  const dz = anchorPos.z - position.z;
+  const offset = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-  // Project punch onto XY to get the line rotation angle
-  const angle = Math.atan2(punchVelocity.y, punchVelocity.x);
+  // Line length = distance to anchor (capped). PERFECT = tiny dot, far off = long line
+  const lineLength = Math.max(0.02, Math.min(offset, 0.5));
 
-  // Face toward player, then rotate line to align with punch direction
+  // Direction from hit → anchor projected onto frontal plane (XY)
+  const angle = Math.atan2(dy, dx);
+
+  // Face toward player, rotate line to point toward anchor
   line.lookAt(position.x, position.y, position.z + 1);
-  line.rotation.z = angle + Math.PI / 2; // PlaneGeometry is vertical by default
+  line.rotation.z = angle + Math.PI / 2;
   line.scale.set(1, lineLength, 1);
 
   line.userData = {
