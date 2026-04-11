@@ -291,13 +291,24 @@ for (let i = 0; i < 2; i++) {
   const gloveMat = new THREE.MeshStandardMaterial({
     color: gloveColor,
     emissive: gloveColor,
-    emissiveIntensity: 0.3,
+    emissiveIntensity: 0.4,
     transparent: true,
     opacity: 0.7,
   });
   const glove = new THREE.Mesh(gloveGeo, gloveMat);
   controller.add(glove);
   glovesMeshes.push(glove);
+
+  // Punch direction indicator on glove — shows expected punch type
+  const gloveArrowGeo = new THREE.ConeGeometry(0.02, 0.06, 4);
+  const gloveArrowMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 0.6,
+  });
+  const gloveArrow = new THREE.Mesh(gloveArrowGeo, gloveArrowMat);
+  gloveArrow.position.set(0, 0, -0.1);
+  gloveArrow.visible = false;
+  controller.add(gloveArrow);
+  controller.userData.gloveArrow = gloveArrow;
 
   // Trail line
   const trailGeo = new THREE.BufferGeometry();
@@ -316,6 +327,17 @@ for (let i = 0; i < 2; i++) {
 }
 
 // ─────────────────────────────────────────────
+// PUNCH TYPES — expected velocity direction per type
+// ─────────────────────────────────────────────
+const PUNCH_TYPES = {
+  jab:      { dir: new THREE.Vector3(0, 0, -1), label: 'JAB' },
+  cross:    { dir: new THREE.Vector3(0, 0, -1), label: 'CROSS' },
+  hook_l:   { dir: new THREE.Vector3(1, 0, 0),  label: 'HOOK' },   // left hand hooks right
+  hook_r:   { dir: new THREE.Vector3(-1, 0, 0), label: 'HOOK' },   // right hand hooks left
+  uppercut: { dir: new THREE.Vector3(0, 1, 0),  label: 'UPPER' },
+};
+
+// ─────────────────────────────────────────────
 // TARGET POOL & GENERATION
 // ─────────────────────────────────────────────
 const targetPool = [];
@@ -324,6 +346,12 @@ const TARGET_POOL_SIZE = 20;
 // Reusable geometry/material
 const targetGeo = new THREE.OctahedronGeometry(CONFIG.TARGET_RADIUS, 1);
 const targetOuterGeo = new THREE.OctahedronGeometry(CONFIG.TARGET_RADIUS * 1.4, 1);
+
+// Direction arrow — cone pointing in expected punch direction
+const arrowGeo = new THREE.ConeGeometry(0.04, 0.12, 6);
+const arrowMat = new THREE.MeshBasicMaterial({
+  color: 0xffffff, transparent: true, opacity: 0.8,
+});
 
 // Shared materials per color variant (left / right / neutral)
 function makeTargetInnerMat(color) {
@@ -353,9 +381,25 @@ function createTarget() {
   group.add(outer);
   group.userData.outer = outer;
 
+  // Direction arrow — rotated per punch type on spawn
+  const arrow = new THREE.Mesh(arrowGeo, arrowMat);
+  arrow.position.set(0, 0, 0);
+  group.add(arrow);
+  group.userData.arrow = arrow;
+
   group.visible = false;
   scene.add(group);
   return group;
+}
+
+// Orient the arrow mesh to point along a direction vector
+function orientArrow(arrow, dir) {
+  // ConeGeometry points along +Y by default; rotate to match dir
+  const up = new THREE.Vector3(0, 1, 0);
+  const q = new THREE.Quaternion().setFromUnitVectors(up, dir.clone().normalize());
+  arrow.quaternion.copy(q);
+  // Offset arrow tip to sit on target surface
+  arrow.position.copy(dir).normalize().multiplyScalar(CONFIG.TARGET_RADIUS * 1.6);
 }
 
 // Pre-populate pool
@@ -372,10 +416,14 @@ function getTarget() {
   return t;
 }
 
-// Spawn patterns — aligned with anchor points
+// Spawn patterns — each target has a punch type with expected direction
 const SPAWN_PATTERNS = [
-  { positions: [{ x: -0.5, y: 1.3, hand: 0 }], name: 'left' },
-  { positions: [{ x: 0.5, y: 1.3, hand: 1 }], name: 'right' },
+  { positions: [{ x: -0.5, y: 1.3, hand: 0, punch: 'jab' }],      name: 'left_jab' },
+  { positions: [{ x: 0.5, y: 1.3, hand: 1, punch: 'cross' }],     name: 'right_cross' },
+  { positions: [{ x: -0.5, y: 1.3, hand: 0, punch: 'hook_l' }],   name: 'left_hook' },
+  { positions: [{ x: 0.5, y: 1.3, hand: 1, punch: 'hook_r' }],    name: 'right_hook' },
+  { positions: [{ x: -0.5, y: 1.3, hand: 0, punch: 'uppercut' }], name: 'left_upper' },
+  { positions: [{ x: 0.5, y: 1.3, hand: 1, punch: 'uppercut' }],  name: 'right_upper' },
 ];
 
 function spawnTarget() {
@@ -390,7 +438,15 @@ function spawnTarget() {
     target.userData.hit = false;
     target.userData.spawnTime = performance.now();
 
-    // Position: fixed from pattern, no randomness — consistent for muscle memory
+    // Punch type and expected direction
+    const punchType = PUNCH_TYPES[pos.punch || 'jab'];
+    target.userData.punchType = pos.punch || 'jab';
+    target.userData.expectedDir = punchType.dir.clone();
+
+    // Orient direction arrow
+    orientArrow(target.userData.arrow, punchType.dir);
+
+    // Position: fixed from pattern
     target.position.set(pos.x, pos.y, -CONFIG.SPAWN_DISTANCE);
 
     target.visible = true;
@@ -402,17 +458,42 @@ function spawnTarget() {
 // ─────────────────────────────────────────────
 // SCORING & FEEDBACK
 // ─────────────────────────────────────────────
-function evaluateHit(distance) {
+// Evaluate hit — combines distance accuracy + angle accuracy
+function evaluateHit(distance, punchVelocity, expectedDir) {
+  // Distance grade
+  let distLabel, distScore;
   if (distance < CONFIG.PERFECT_THRESHOLD) {
-    return { label: 'PERFECT', score: 100, color: CONFIG.PERFECT_COLOR };
+    distLabel = 'PERFECT'; distScore = 100;
   } else if (distance < CONFIG.GREAT_THRESHOLD) {
-    return { label: 'GREAT', score: 75, color: CONFIG.GREAT_COLOR };
+    distLabel = 'GREAT'; distScore = 75;
   } else if (distance < CONFIG.GOOD_THRESHOLD) {
-    return { label: 'GOOD', score: 50, color: CONFIG.GOOD_COLOR };
+    distLabel = 'GOOD'; distScore = 50;
   } else if (distance < CONFIG.HIT_DISTANCE) {
-    return { label: 'WEAK', score: 20, color: 0x886644, breaksCombo: true };
+    distLabel = 'WEAK'; distScore = 20;
+  } else {
+    return null;
   }
-  return null;
+
+  // Angle accuracy: dot product of punch direction vs expected
+  let angleAccuracy = 1.0;
+  if (expectedDir && punchVelocity.lengthSq() > 0.01) {
+    tmpVec.copy(punchVelocity).normalize();
+    angleAccuracy = Math.max(0, tmpVec.dot(expectedDir));
+  }
+
+  // Combined score — angle scales the distance score
+  const score = Math.round(distScore * (0.5 + 0.5 * angleAccuracy));
+  const breaksCombo = distLabel === 'WEAK' || angleAccuracy < 0.3;
+
+  // Label reflects worst dimension
+  const label = angleAccuracy < 0.3 ? 'WEAK' :
+                angleAccuracy < 0.6 ? (distLabel === 'PERFECT' ? 'GREAT' : distLabel) :
+                distLabel;
+  const color = label === 'PERFECT' ? CONFIG.PERFECT_COLOR :
+                label === 'GREAT'   ? CONFIG.GREAT_COLOR :
+                label === 'GOOD'    ? CONFIG.GOOD_COLOR : 0x886644;
+
+  return { label, score, color, angleAccuracy, breaksCombo };
 }
 
 function showFeedback(position, label, color) {
@@ -438,7 +519,9 @@ function showFeedback(position, label, color) {
 }
 
 function onHit(target, controllerIndex, distance) {
-  const result = evaluateHit(distance);
+  const punchVel = state.controllerVelocities[controllerIndex];
+  const expectedDir = target.userData.expectedDir || null;
+  const result = evaluateHit(distance, punchVel, expectedDir);
   if (!result) return;
 
   // target.visible and .hit already set by collision code
@@ -467,13 +550,13 @@ function onHit(target, controllerIndex, distance) {
 
   // Impact mark — hand color (blue/red), opacity encodes precision
   const handColor = controllerIndex === 0 ? CONFIG.LEFT_COLOR : CONFIG.RIGHT_COLOR;
-  const punchVel = state.controllerVelocities[controllerIndex];
   createImpactMark(target.position.clone(), punchVel, handColor, result.label);
 
   // Show feedback text
   const feedbackPos = target.position.clone();
   feedbackPos.y += 0.3;
-  showFeedback(feedbackPos, `${result.label} +${points}`, result.color);
+  const angleTag = result.angleAccuracy < 0.6 ? ' ✕' : '';
+  showFeedback(feedbackPos, `${result.label} +${points}${angleTag}`, result.color);
 
   // Glove pulse
   const glove = glovesMeshes[controllerIndex];
@@ -941,11 +1024,14 @@ function calibrationLoop(delta) {
     state.sessionStart = performance.now();
     state.lastBeatTime = performance.now();
 
-    // Update spawn patterns with calibrated positions
-    SPAWN_PATTERNS[0].positions[0].x = calibration.left.x;
-    SPAWN_PATTERNS[0].positions[0].y = calibration.left.y;
-    SPAWN_PATTERNS[1].positions[0].x = calibration.right.x;
-    SPAWN_PATTERNS[1].positions[0].y = calibration.right.y;
+    // Update all spawn patterns with calibrated positions
+    for (const pat of SPAWN_PATTERNS) {
+      for (const pos of pat.positions) {
+        const cal = pos.hand === 0 ? calibration.left : calibration.right;
+        pos.x = cal.x;
+        pos.y = cal.y;
+      }
+    }
 
     updateAnchorPositions();
     return;
@@ -1013,6 +1099,27 @@ function gameLoop(timestamp, frame) {
     if (glove && glove.scale.x > 1.0) {
       glove.scale.multiplyScalar(0.9);
       if (glove.scale.x < 1.01) glove.scale.setScalar(1.0);
+    }
+
+    // Glove direction indicator — show nearest target's punch direction
+    const ga = ctrl.userData.gloveArrow;
+    if (ga) {
+      let nearest = null, nearestDist = Infinity;
+      for (const t of state.targets) {
+        if (t.userData.hit || !t.visible) continue;
+        if (t.userData.hand !== -1 && t.userData.hand !== i) continue;
+        const d = t.position.z;
+        if (d > -2.0 && d < nearestDist) { nearest = t; nearestDist = d; }
+      }
+      if (nearest && nearest.userData.expectedDir) {
+        ga.visible = true;
+        const dir = nearest.userData.expectedDir;
+        const upV = new THREE.Vector3(0, 1, 0);
+        ga.quaternion.setFromUnitVectors(upV, dir);
+        ga.position.copy(dir).multiplyScalar(0.12);
+      } else {
+        ga.visible = false;
+      }
     }
   }
 
