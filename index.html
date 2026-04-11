@@ -105,7 +105,6 @@ const CONFIG = {
   MISS_COLOR: 0xff2222,
 
   // Ink impact lines
-  INK_SPLAT_BASE_SIZE: 0.2,    // base line length
   INK_RESIDUE_LIFETIME: 30,    // seconds before fade
   INK_RESIDUE_FADE_TIME: 5,    // seconds to fade out
   MAX_RESIDUE_MARKS: 100,      // cap for performance
@@ -549,7 +548,8 @@ function onMiss(target) {
 
   const missHandColor = target.userData.hand === 0 ? CONFIG.LEFT_COLOR :
                         target.userData.hand === 1 ? CONFIG.RIGHT_COLOR : 0x666666;
-  createMissMark(target.position, missHandColor);
+  const anchor = target.userData.hand === 0 ? calibration.left : calibration.right;
+  createMissMark(target.position, anchor, missHandColor);
 
   const feedbackPos = target.position.clone();
   feedbackPos.y += 0.2;
@@ -561,10 +561,7 @@ function onMiss(target) {
 // INK IMPACT — thin line at hit position
 // ─────────────────────────────────────────────
 
-// Thin line geometry — 1 unit tall, very narrow
-const inkLineGeo = new THREE.PlaneGeometry(0.01, 1);
-
-// Draw a thin line from anchor center to hit position
+// Line from anchor to hit position — just connect two points
 function createImpactMark(hitPos, anchorPos, color, hitQuality) {
   while (state.inkResidues.length >= CONFIG.MAX_RESIDUE_MARKS) {
     const oldest = state.inkResidues.shift();
@@ -576,32 +573,14 @@ function createImpactMark(hitPos, anchorPos, color, hitQuality) {
                          hitQuality === 'GREAT'   ? 0.75 :
                          hitQuality === 'GOOD'    ? 0.5  : 0.25;
 
-  const mat = new THREE.MeshBasicMaterial({
+  const geo = new THREE.BufferGeometry().setFromPoints([
+    anchorPos.clone(),
+    hitPos.clone(),
+  ]);
+  const mat = new THREE.LineBasicMaterial({
     color, transparent: true, opacity: qualityOpacity,
-    depthWrite: false, side: THREE.DoubleSide,
   });
-
-  const line = new THREE.Mesh(inkLineGeo, mat);
-
-  // Midpoint between anchor and hit
-  const mx = (anchorPos.x + hitPos.x) / 2;
-  const my = (anchorPos.y + hitPos.y) / 2;
-  const mz = (anchorPos.z + hitPos.z) / 2;
-  line.position.set(mx, my, mz);
-
-  // Length = distance between anchor and hit
-  const dx = hitPos.x - anchorPos.x;
-  const dy = hitPos.y - anchorPos.y;
-  const dz = hitPos.z - anchorPos.z;
-  const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-  const lineLength = Math.max(0.01, dist);
-
-  // Angle from anchor → hit projected onto frontal plane
-  const angle = Math.atan2(dy, dx);
-
-  line.lookAt(mx, my, mz + 1);
-  line.rotation.z = angle + Math.PI / 2;
-  line.scale.set(1, lineLength, 1);
+  const line = new THREE.Line(geo, mat);
 
   line.userData = {
     spawnTime: performance.now(),
@@ -615,23 +594,22 @@ function createImpactMark(hitPos, anchorPos, color, hitQuality) {
   state.inkResidues.push(line);
 }
 
-// Miss mark — faint thin X at target position
-function createMissMark(position, handColor) {
+// Miss line — anchor to miss position, very faint
+function createMissMark(missPos, anchorPos, handColor) {
   while (state.inkResidues.length >= CONFIG.MAX_RESIDUE_MARKS) {
     const oldest = state.inkResidues.shift();
     scene.remove(oldest);
     oldest.material.dispose();
   }
 
-  const mat = new THREE.MeshBasicMaterial({
+  const geo = new THREE.BufferGeometry().setFromPoints([
+    anchorPos.clone(),
+    missPos.clone(),
+  ]);
+  const mat = new THREE.LineBasicMaterial({
     color: handColor, transparent: true, opacity: 0.15,
-    depthWrite: false, side: THREE.DoubleSide,
   });
-
-  const line = new THREE.Mesh(inkLineGeo, mat);
-  line.position.copy(position);
-  line.lookAt(position.x, position.y, position.z + 1);
-  line.scale.set(1, CONFIG.INK_SPLAT_BASE_SIZE, 1);
+  const line = new THREE.Line(geo, mat);
 
   line.userData = {
     spawnTime: performance.now(),
@@ -656,6 +634,7 @@ function updateInkSystem(delta) {
 
     if (remaining <= 0) {
       scene.remove(r);
+      r.geometry.dispose();
       r.material.dispose();
       state.inkResidues.splice(i, 1);
     } else if (remaining < r.userData.fadeTime) {
