@@ -110,6 +110,10 @@ const CONFIG = {
   INK_RESIDUE_LIFETIME: 30,    // seconds before residue fades
   INK_RESIDUE_FADE_TIME: 5,    // seconds to fade out
   MAX_RESIDUE_MARKS: 100,      // cap for performance
+
+  // Anchor point — ideal hit zone
+  IDEAL_HIT_Z: -0.3,           // Z where perfect timing punch lands (arm's reach)
+  ANCHOR_SIZE: 0.12,           // radius of anchor ring
 };
 
 // ─────────────────────────────────────────────
@@ -384,11 +388,13 @@ function spawnTarget() {
     target.userData.spawnTime = performance.now();
 
     // Position: offset X/Y, far on Z
-    target.position.set(
-      pos.x + (Math.random() - 0.5) * 0.2,
-      pos.y + (Math.random() - 0.5) * 0.1,
-      -CONFIG.SPAWN_DISTANCE
-    );
+    const spawnX = pos.x + (Math.random() - 0.5) * 0.2;
+    const spawnY = pos.y + (Math.random() - 0.5) * 0.1;
+    target.position.set(spawnX, spawnY, -CONFIG.SPAWN_DISTANCE);
+
+    // Store ideal hit position (same X/Y, target travels straight on Z)
+    target.userData.idealX = spawnX;
+    target.userData.idealY = spawnY;
     target.visible = true;
     target.scale.setScalar(0.01);
     state.targets.push(target);
@@ -461,7 +467,10 @@ function onHit(target, controllerIndex, distance) {
     }
   }
 
-  // Impact mark — single splat stretched along punch direction
+  // Anchor ring — ideal hit position for this target
+  createAnchor(target.userData.idealX, target.userData.idealY, target.userData.hand);
+
+  // Impact mark — single splat at actual hit position, perpendicular to punch
   const punchVel = state.controllerVelocities[controllerIndex];
   createImpactMark(target.position.clone(), punchVel, result.color, result.label);
 
@@ -481,7 +490,8 @@ function onMiss(target) {
   state.combo = 0;
   state.hits.miss++;
 
-  // Red splat on back wall at target's X/Y
+  // Anchor ring at ideal position + red splat at miss position
+  createAnchor(target.userData.idealX, target.userData.idealY, target.userData.hand);
   createMissMark(target.position);
 
   const feedbackPos = target.position.clone();
@@ -547,10 +557,44 @@ function generateSplatTexture(color) {
   return texture;
 }
 
-// Wall Z for projecting all impact marks onto the back wall surface
-const WALL_Z = 0.01; // just in front of back wall at z=0
+// ── Anchor ring geometry (shared) ──
+const anchorRingGeo = new THREE.RingGeometry(0.9, 1.0, 24);
 
-// Create a single impact mark — projected onto back wall, stretched along punch direction
+// Place an anchor ring at the ideal hit position for a target
+function createAnchor(targetX, targetY, hand) {
+  while (state.inkResidues.length >= CONFIG.MAX_RESIDUE_MARKS) {
+    const oldest = state.inkResidues.shift();
+    scene.remove(oldest);
+    if (!oldest.userData.isAnchor) {
+      oldest.material.map?.dispose();
+      oldest.material.dispose();
+    }
+  }
+
+  const z = CONFIG.IDEAL_HIT_Z;
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 0.35,
+    depthWrite: false, side: THREE.DoubleSide,
+  });
+  const anchor = new THREE.Mesh(anchorRingGeo, mat);
+  anchor.position.set(targetX, targetY, z);
+  // Face toward player
+  anchor.lookAt(targetX, targetY, z + 1);
+  anchor.scale.setScalar(CONFIG.ANCHOR_SIZE);
+
+  anchor.userData = {
+    isAnchor: true,
+    spawnTime: performance.now(),
+    lifetime: CONFIG.INK_RESIDUE_LIFETIME * 1000,
+    fadeTime: CONFIG.INK_RESIDUE_FADE_TIME * 1000,
+    baseOpacity: 0.35,
+  };
+
+  scene.add(anchor);
+  state.inkResidues.push(anchor);
+}
+
+// Create a single impact mark at hit position, oriented perpendicular to punch
 function createImpactMark(position, punchVelocity, color, hitQuality) {
   // Remove oldest if over cap
   while (state.inkResidues.length >= CONFIG.MAX_RESIDUE_MARKS) {
@@ -570,12 +614,17 @@ function createImpactMark(position, punchVelocity, color, hitQuality) {
   });
 
   const splat = new THREE.Mesh(inkSplatGeo, mat);
+  splat.position.copy(position);
 
-  // Project onto back wall: keep X/Y from hit position, pin Z to wall
-  splat.position.set(position.x, position.y, WALL_Z);
-
-  // Face toward the player (wall normal = +Z)
-  splat.lookAt(splat.position.x, splat.position.y, splat.position.z + 1);
+  // Orient perpendicular to punch direction — like a stamp the fist leaves
+  const punchSpeed = punchVelocity.length();
+  if (punchSpeed > 0.1) {
+    tmpVec.copy(position).add(punchVelocity);
+    splat.lookAt(tmpVec);
+  } else {
+    // Fallback: face toward player
+    splat.lookAt(position.x, position.y, position.z + 1);
+  }
 
   // Size based on hit quality
   const baseSize = CONFIG.INK_SPLAT_BASE_SIZE;
@@ -583,21 +632,12 @@ function createImpactMark(position, punchVelocity, color, hitQuality) {
                       hitQuality === 'GREAT' ? 1.2 :
                       hitQuality === 'GOOD' ? 0.9 : 0.6;
 
-  // Stretch along punch direction to show force vector
-  const punchSpeed = punchVelocity.length();
+  // Stretch along punch force
   const stretchAmount = Math.min(1 + (punchSpeed / 3) * CONFIG.INK_SPLAT_STRETCH, 4.0);
-
-  // Get punch direction projected onto wall plane (X = horizontal, Y = vertical)
-  const punchX = punchVelocity.x;
-  const punchY = punchVelocity.y;
-  const angle = Math.atan2(punchY, punchX);
-
-  // Rotate so stretch axis aligns with punch, then scale non-uniformly
-  splat.rotation.z = angle;
   const sizeBase = baseSize * qualityMult;
   splat.scale.set(
-    sizeBase * stretchAmount,  // stretched along punch direction
-    sizeBase,                  // normal perpendicular to punch
+    sizeBase * stretchAmount,  // stretched along major axis
+    sizeBase,                  // perpendicular
     1
   );
 
@@ -613,7 +653,7 @@ function createImpactMark(position, punchVelocity, color, hitQuality) {
   state.inkResidues.push(splat);
 }
 
-// Create miss wall splat — no directional stretch, just a big red mark on wall
+// Miss mark at target position, facing player
 function createMissMark(position) {
   while (state.inkResidues.length >= CONFIG.MAX_RESIDUE_MARKS) {
     const oldest = state.inkResidues.shift();
@@ -632,8 +672,8 @@ function createMissMark(position) {
   });
 
   const splat = new THREE.Mesh(inkSplatGeo, mat);
-  splat.position.set(position.x, position.y, WALL_Z);
-  splat.lookAt(splat.position.x, splat.position.y, splat.position.z + 1);
+  splat.position.copy(position);
+  splat.lookAt(position.x, position.y, position.z + 1);
   splat.rotation.z = Math.random() * Math.PI * 2;
   const size = CONFIG.INK_SPLAT_BASE_SIZE * (1.5 + Math.random() * 0.5);
   splat.scale.set(size, size, 1);
