@@ -51,6 +51,7 @@
   <p>WebXR 6DoF Rhythm Fighting</p>
   <button id="enter-vr" disabled>Checking WebXR...</button>
   <div id="status"></div>
+  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.2.0-ink</div>
 </div>
 
 <div id="debug"></div>
@@ -222,6 +223,29 @@ function createArena() {
     strip.position.set(side * 1.5, 0.01, -4);
     scene.add(strip);
   }
+
+  // ── Back wall (miss targets splat here) ──
+  const wallGeo = new THREE.PlaneGeometry(8, 4);
+  const wallMat = new THREE.MeshStandardMaterial({
+    color: 0x0a0a18,
+    roughness: 0.6,
+    metalness: 0.2,
+    transparent: true,
+    opacity: 0.85,
+  });
+  const backWall = new THREE.Mesh(wallGeo, wallMat);
+  backWall.position.set(0, 2, CONFIG.MISS_DISTANCE + 0.5);
+  backWall.name = 'backWall';
+  scene.add(backWall);
+
+  // Subtle border glow on wall edges
+  const wallBorderGeo = new THREE.EdgesGeometry(wallGeo);
+  const wallBorderMat = new THREE.LineBasicMaterial({
+    color: 0x332244, transparent: true, opacity: 0.5,
+  });
+  const wallBorder = new THREE.LineSegments(wallBorderGeo, wallBorderMat);
+  wallBorder.position.copy(backWall.position);
+  scene.add(wallBorder);
 }
 createArena();
 
@@ -455,6 +479,33 @@ function onHit(target, controllerIndex, distance) {
 function onMiss(target) {
   state.combo = 0;
   state.hits.miss++;
+
+  // Ink splat on back wall — target smashes into wall
+  const wallZ = CONFIG.MISS_DISTANCE + 0.52; // just in front of wall surface
+  const splatPos = new THREE.Vector3(target.position.x, target.position.y, wallZ);
+  const wallNormal = new THREE.Vector3(0, 0, 1); // wall faces player
+
+  // Big red splat on wall
+  createInkResidue(splatPos, wallNormal, CONFIG.MISS_COLOR, 1.8, 'MISS');
+
+  // Drip effect — several smaller splats below impact, simulating ink running down
+  const dripCount = 3 + Math.floor(Math.random() * 3);
+  for (let d = 0; d < dripCount; d++) {
+    const dripPos = splatPos.clone();
+    dripPos.x += (Math.random() - 0.5) * 0.2;
+    dripPos.y -= 0.1 + Math.random() * 0.4 * (d + 1);
+    dripPos.z = wallZ;
+    createInkResidue(dripPos, wallNormal, CONFIG.MISS_COLOR, 0.4 + Math.random() * 0.3, 'MISS');
+  }
+
+  // Some ink droplets spray off the wall toward player
+  const splashVel = new THREE.Vector3(
+    (Math.random() - 0.5) * 2,
+    1 + Math.random(),
+    1.5
+  );
+  createInkSplatter(splatPos, splashVel, CONFIG.MISS_COLOR, 'GOOD'); // smaller splash
+
   const feedbackPos = target.position.clone();
   feedbackPos.y += 0.2;
   showFeedback(feedbackPos, 'MISS', CONFIG.MISS_COLOR);
@@ -1084,42 +1135,105 @@ enterBtn.addEventListener('click', async () => {
 // DESKTOP PREVIEW (for testing without headset)
 // ─────────────────────────────────────────────
 function initDesktopControls() {
-  // Simulate controllers with mouse position
-  const raycaster = new THREE.Raycaster();
+  // Desktop overrides — relax thresholds for easy testing
+  CONFIG.HIT_DISTANCE = 1.2;        // much larger hit zone
+  CONFIG.MIN_PUNCH_VELOCITY = 0.0;  // no speed requirement
+  CONFIG.TARGET_SPEED = 2.0;        // slower targets
+
   const mouse = new THREE.Vector2();
+  let autoHitEnabled = true;
+
+  // On-screen instructions
+  const hint = document.createElement('div');
+  hint.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:20;' +
+    'color:#888;font-size:13px;font-family:monospace;background:rgba(0,0,0,0.7);padding:8px 16px;border-radius:8px;';
+  hint.innerHTML = 'Desktop Test Mode — <b>Mouse</b>: aim | <b>Click</b>: punch | <b>Space</b>: toggle auto-hit | <b>WASD</b>: move';
+  document.body.appendChild(hint);
+
+  // Auto-hit indicator
+  const autoLabel = document.createElement('div');
+  autoLabel.style.cssText = 'position:fixed;top:40px;left:50%;transform:translateX(-50%);z-index:20;' +
+    'color:#0f0;font-size:12px;font-family:monospace;background:rgba(0,0,0,0.5);padding:4px 10px;border-radius:4px;';
+  autoLabel.textContent = 'AUTO-HIT: ON';
+  document.body.appendChild(autoLabel);
+
+  // Crosshair cursor
+  const crosshair = document.createElement('div');
+  crosshair.style.cssText = 'position:fixed;width:20px;height:20px;pointer-events:none;z-index:25;' +
+    'border:2px solid rgba(255,107,53,0.8);border-radius:50%;transform:translate(-50%,-50%);' +
+    'box-shadow:0 0 10px rgba(255,107,53,0.3);';
+  document.body.appendChild(crosshair);
 
   document.addEventListener('mousemove', (e) => {
     mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
 
-    // Move a virtual controller
+    // Position crosshair
+    crosshair.style.left = e.clientX + 'px';
+    crosshair.style.top = e.clientY + 'px';
+
+    // Move virtual controllers to match mouse in 3D space
     const x = mouse.x * 2;
     const y = 1.3 + mouse.y * 0.8;
-    controllers[0].position.set(x - 0.3, y, -0.5);
-    controllers[1].position.set(x + 0.3, y, -0.5);
+    controllers[0].position.set(x - 0.15, y, -0.3);
+    controllers[1].position.set(x + 0.15, y, -0.3);
   });
 
+  // Click = manual punch (always set high velocity)
   document.addEventListener('click', () => {
-    // Simulate a fast punch on click
-    state.controllerVelocities[0].set(0, 0, -5);
-    state.controllerVelocities[1].set(0, 0, -5);
+    state.controllerVelocities[0].set(0, 0, -8);
+    state.controllerVelocities[1].set(0, 0, -8);
     setTimeout(() => {
       state.controllerVelocities[0].set(0, 0, 0);
       state.controllerVelocities[1].set(0, 0, 0);
-    }, 100);
+    }, 150);
+  });
+
+  // Space = toggle auto-hit
+  document.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') {
+      e.preventDefault();
+      autoHitEnabled = !autoHitEnabled;
+      autoLabel.textContent = 'AUTO-HIT: ' + (autoHitEnabled ? 'ON' : 'OFF');
+      autoLabel.style.color = autoHitEnabled ? '#0f0' : '#f44';
+    }
   });
 
   // WASD camera
   const keys = {};
-  document.addEventListener('keydown', (e) => keys[e.key.toLowerCase()] = true);
-  document.addEventListener('keyup', (e) => keys[e.key.toLowerCase()] = false);
+  document.addEventListener('keydown', (e) => { if (e.key.length === 1) keys[e.key.toLowerCase()] = true; });
+  document.addEventListener('keyup', (e) => { if (e.key.length === 1) keys[e.key.toLowerCase()] = false; });
 
+  // Desktop game loop — auto-hit nearby targets
   function desktopUpdate() {
-    const speed = 2 * clock.getDelta();
+    const dt = clock.getDelta();
+
+    // Camera movement
+    const speed = 3 * dt;
     if (keys['w']) camera.position.z -= speed;
     if (keys['s']) camera.position.z += speed;
     if (keys['a']) camera.position.x -= speed;
     if (keys['d']) camera.position.x += speed;
+
+    // Auto-hit: when targets get close, automatically punch them
+    if (autoHitEnabled) {
+      for (const target of state.targets) {
+        if (target.userData.hit || !target.visible) continue;
+        // Auto-hit when target is within reach (z > -1.0)
+        if (target.position.z > -1.0) {
+          // Teleport controller to target and set velocity
+          const hand = target.userData.hand === 1 ? 1 : 0;
+          controllers[hand].position.copy(target.position);
+          controllers[hand].position.z += 0.1;
+          state.controllerVelocities[hand].set(0, 0, -6);
+          setTimeout(() => {
+            state.controllerVelocities[hand].set(0, 0, 0);
+          }, 80);
+          break; // one per frame
+        }
+      }
+    }
+
     requestAnimationFrame(desktopUpdate);
   }
   desktopUpdate();
