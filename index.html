@@ -481,11 +481,8 @@ function onMiss(target) {
   state.combo = 0;
   state.hits.miss++;
 
-  // Ink splat on back wall — target smashes into wall
-  const wallZ = CONFIG.MISS_DISTANCE + 0.52; // just in front of wall surface
-  const splatPos = new THREE.Vector3(target.position.x, target.position.y, wallZ);
-  // Single red splat on wall
-  createMissMark(splatPos);
+  // Red splat on back wall at target's X/Y
+  createMissMark(target.position);
 
   const feedbackPos = target.position.clone();
   feedbackPos.y += 0.2;
@@ -550,7 +547,10 @@ function generateSplatTexture(color) {
   return texture;
 }
 
-// Create a single impact mark — stretched along punch direction
+// Wall Z for projecting all impact marks onto the back wall surface
+const WALL_Z = 0.01; // just in front of back wall at z=0
+
+// Create a single impact mark — projected onto back wall, stretched along punch direction
 function createImpactMark(position, punchVelocity, color, hitQuality) {
   // Remove oldest if over cap
   while (state.inkResidues.length >= CONFIG.MAX_RESIDUE_MARKS) {
@@ -570,11 +570,12 @@ function createImpactMark(position, punchVelocity, color, hitQuality) {
   });
 
   const splat = new THREE.Mesh(inkSplatGeo, mat);
-  splat.position.copy(position);
 
-  // Face toward the player
-  tmpVec.set(0, 0, 1);
-  splat.lookAt(position.clone().add(tmpVec));
+  // Project onto back wall: keep X/Y from hit position, pin Z to wall
+  splat.position.set(position.x, position.y, WALL_Z);
+
+  // Face toward the player (wall normal = +Z)
+  splat.lookAt(splat.position.x, splat.position.y, splat.position.z + 1);
 
   // Size based on hit quality
   const baseSize = CONFIG.INK_SPLAT_BASE_SIZE;
@@ -583,17 +584,15 @@ function createImpactMark(position, punchVelocity, color, hitQuality) {
                       hitQuality === 'GOOD' ? 0.9 : 0.6;
 
   // Stretch along punch direction to show force vector
-  // Project punch velocity onto the splat's local XY plane (facing player)
   const punchSpeed = punchVelocity.length();
   const stretchAmount = Math.min(1 + (punchSpeed / 3) * CONFIG.INK_SPLAT_STRETCH, 4.0);
 
-  // Get punch direction in 2D (X = horizontal, Y = vertical relative to splat)
+  // Get punch direction projected onto wall plane (X = horizontal, Y = vertical)
   const punchX = punchVelocity.x;
   const punchY = punchVelocity.y;
   const angle = Math.atan2(punchY, punchX);
 
-  // Apply directional stretch: rotate the splat so stretch axis aligns with punch,
-  // then scale non-uniformly
+  // Rotate so stretch axis aligns with punch, then scale non-uniformly
   splat.rotation.z = angle;
   const sizeBase = baseSize * qualityMult;
   splat.scale.set(
@@ -614,8 +613,15 @@ function createImpactMark(position, punchVelocity, color, hitQuality) {
   state.inkResidues.push(splat);
 }
 
-// Create miss wall splat — no directional stretch, just a big red mark
+// Create miss wall splat — no directional stretch, just a big red mark on wall
 function createMissMark(position) {
+  while (state.inkResidues.length >= CONFIG.MAX_RESIDUE_MARKS) {
+    const oldest = state.inkResidues.shift();
+    scene.remove(oldest);
+    oldest.material.map?.dispose();
+    oldest.material.dispose();
+  }
+
   const texture = getSplatTexture(CONFIG.MISS_COLOR);
   const mat = new THREE.MeshBasicMaterial({
     map: texture,
@@ -626,9 +632,8 @@ function createMissMark(position) {
   });
 
   const splat = new THREE.Mesh(inkSplatGeo, mat);
-  splat.position.copy(position);
-  tmpVec.set(0, 0, 1);
-  splat.lookAt(position.clone().add(tmpVec));
+  splat.position.set(position.x, position.y, WALL_Z);
+  splat.lookAt(splat.position.x, splat.position.y, splat.position.z + 1);
   splat.rotation.z = Math.random() * Math.PI * 2;
   const size = CONFIG.INK_SPLAT_BASE_SIZE * (1.5 + Math.random() * 0.5);
   splat.scale.set(size, size, 1);
