@@ -390,9 +390,6 @@ function spawnTarget() {
     // Position: fixed from pattern, no randomness — consistent for muscle memory
     target.position.set(pos.x, pos.y, -CONFIG.SPAWN_DISTANCE);
 
-    // Store ideal hit position — fixed pattern position, no randomness
-    target.userData.idealX = pos.x;
-    target.userData.idealY = pos.y;
     target.visible = true;
     target.scale.setScalar(0.01);
     state.targets.push(target);
@@ -465,9 +462,6 @@ function onHit(target, controllerIndex, distance) {
     }
   }
 
-  // Anchor ring — ideal hit position for this target
-  createAnchor(target.userData.idealX, target.userData.idealY, target.userData.hand);
-
   // Impact mark — hand color (blue/red), opacity encodes precision
   const handColor = controllerIndex === 0 ? CONFIG.LEFT_COLOR : CONFIG.RIGHT_COLOR;
   const punchVel = state.controllerVelocities[controllerIndex];
@@ -489,8 +483,6 @@ function onMiss(target) {
   state.combo = 0;
   state.hits.miss++;
 
-  // Anchor ring at ideal position + red splat at miss position
-  createAnchor(target.userData.idealX, target.userData.idealY, target.userData.hand);
   const missHandColor = target.userData.hand === 0 ? CONFIG.LEFT_COLOR :
                         target.userData.hand === 1 ? CONFIG.RIGHT_COLOR : 0x666666;
   createMissMark(target.position, missHandColor);
@@ -558,42 +550,32 @@ function generateSplatTexture(color) {
   return texture;
 }
 
-// ── Anchor ring geometry (shared) ──
+// ── Permanent anchor rings — fixed reference points at all pattern positions ──
 const anchorRingGeo = new THREE.RingGeometry(0.9, 1.0, 24);
+const anchorMat = new THREE.MeshBasicMaterial({
+  color: 0xffffff, transparent: true, opacity: 0.35,
+  depthWrite: false, side: THREE.DoubleSide,
+});
 
-// Place an anchor ring at the ideal hit position for a target
-function createAnchor(targetX, targetY, hand) {
-  while (state.inkResidues.length >= CONFIG.MAX_RESIDUE_MARKS) {
-    const oldest = state.inkResidues.shift();
-    scene.remove(oldest);
-    if (!oldest.userData.isAnchor) {
-      oldest.material.map?.dispose();
-      oldest.material.dispose();
+function createPermanentAnchors() {
+  // Collect unique positions from all patterns
+  const seen = new Set();
+  for (const pattern of SPAWN_PATTERNS) {
+    for (const pos of pattern.positions) {
+      const key = `${pos.x},${pos.y}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const z = CONFIG.IDEAL_HIT_Z;
+      const anchor = new THREE.Mesh(anchorRingGeo, anchorMat);
+      anchor.position.set(pos.x, pos.y, z);
+      anchor.lookAt(pos.x, pos.y, z + 1);
+      anchor.scale.setScalar(CONFIG.ANCHOR_SIZE);
+      scene.add(anchor);
     }
   }
-
-  const z = CONFIG.IDEAL_HIT_Z;
-  const mat = new THREE.MeshBasicMaterial({
-    color: 0xffffff, transparent: true, opacity: 0.35,
-    depthWrite: false, side: THREE.DoubleSide,
-  });
-  const anchor = new THREE.Mesh(anchorRingGeo, mat);
-  anchor.position.set(targetX, targetY, z);
-  // Face toward player
-  anchor.lookAt(targetX, targetY, z + 1);
-  anchor.scale.setScalar(CONFIG.ANCHOR_SIZE);
-
-  anchor.userData = {
-    isAnchor: true,
-    spawnTime: performance.now(),
-    lifetime: CONFIG.INK_RESIDUE_LIFETIME * 1000,
-    fadeTime: CONFIG.INK_RESIDUE_FADE_TIME * 1000,
-    baseOpacity: 0.35,
-  };
-
-  scene.add(anchor);
-  state.inkResidues.push(anchor);
 }
+createPermanentAnchors();
 
 // Create a single impact mark — faces player, opacity = precision
 function createImpactMark(position, punchVelocity, color, hitQuality) {
