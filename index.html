@@ -75,14 +75,14 @@ import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFa
 const CONFIG = {
   // Target spawning
   SPAWN_DISTANCE: 5,        // meters in front of player
-  HIT_DISTANCE: 0.6,        // how close to reach target
+  HIT_DISTANCE: 1.0,        // how close to reach target
   TARGET_SPEED: 3.0,        // m/s travel toward player
   TARGET_RADIUS: 0.15,      // target sphere radius
 
   // Scoring
-  PERFECT_THRESHOLD: 0.1,   // meters — distance for "PERFECT"
-  GREAT_THRESHOLD: 0.2,     // "GREAT"
-  GOOD_THRESHOLD: 0.4,      // "GOOD"
+  PERFECT_THRESHOLD: 0.25,  // meters — distance for "PERFECT"
+  GREAT_THRESHOLD: 0.5,     // "GREAT"
+  GOOD_THRESHOLD: 0.75,     // "GOOD"
   MISS_DISTANCE: -0.5,      // passed behind player = miss
 
   // BPM & rhythm
@@ -94,7 +94,7 @@ const CONFIG = {
   USER_WEIGHT_KG: 70,       // default, can be changed
 
   // Velocity thresholds for punch detection
-  MIN_PUNCH_VELOCITY: 1.5,  // m/s — minimum speed to count as a punch
+  MIN_PUNCH_VELOCITY: 0.8,  // m/s — minimum speed to count as a punch
 
   // Colors
   LEFT_COLOR: 0x4488ff,
@@ -460,11 +460,11 @@ function evaluateHit(distance, punchVelocity, expectedDir) {
 
   // Combined score — angle scales the distance score
   const score = Math.round(distScore * (0.5 + 0.5 * angleAccuracy));
-  const breaksCombo = distLabel === 'WEAK' || angleAccuracy < 0.3;
+  const breaksCombo = distLabel === 'WEAK' || angleAccuracy < 0.15;
 
   // Label reflects worst dimension
-  const label = angleAccuracy < 0.3 ? 'WEAK' :
-                angleAccuracy < 0.6 ? (distLabel === 'PERFECT' ? 'GREAT' : distLabel) :
+  const label = angleAccuracy < 0.15 ? 'WEAK' :
+                angleAccuracy < 0.4 ? (distLabel === 'PERFECT' ? 'GREAT' : distLabel) :
                 distLabel;
   const color = label === 'PERFECT' ? CONFIG.PERFECT_COLOR :
                 label === 'GREAT'   ? CONFIG.GREAT_COLOR :
@@ -532,7 +532,7 @@ function onHit(target, controllerIndex, distance) {
   // Show feedback text
   const feedbackPos = target.position.clone();
   feedbackPos.y += 0.3;
-  const angleTag = result.angleAccuracy < 0.6 ? ' ✕' : '';
+  const angleTag = result.angleAccuracy < 0.4 ? ' ✕' : '';
   showFeedback(feedbackPos, `${result.label} +${points}${angleTag}`, result.color);
 
   // Glove pulse
@@ -1248,7 +1248,7 @@ enterBtn.addEventListener('click', async () => {
 // ─────────────────────────────────────────────
 function initDesktopControls() {
   // Desktop overrides — relax thresholds for easy testing
-  CONFIG.HIT_DISTANCE = 1.2;        // much larger hit zone
+  CONFIG.HIT_DISTANCE = 1.5;        // much larger hit zone
   CONFIG.MIN_PUNCH_VELOCITY = 0.0;  // no speed requirement
   CONFIG.TARGET_SPEED = 2.0;        // slower targets
 
