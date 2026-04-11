@@ -51,7 +51,7 @@
   <p>WebXR 6DoF Rhythm Fighting</p>
   <button id="enter-vr" disabled>Checking WebXR...</button>
   <div id="status"></div>
-  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.2.0-ink</div>
+  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.3.0-fix</div>
 </div>
 
 <div id="debug"></div>
@@ -404,6 +404,8 @@ function evaluateHit(distance) {
     return { label: 'GREAT', score: 75, color: CONFIG.GREAT_COLOR };
   } else if (distance < CONFIG.GOOD_THRESHOLD) {
     return { label: 'GOOD', score: 50, color: CONFIG.GOOD_COLOR };
+  } else if (distance < CONFIG.HIT_DISTANCE) {
+    return { label: 'WEAK', score: 20, color: 0x886644, breaksCombo: true };
   }
   return null;
 }
@@ -434,10 +436,13 @@ function onHit(target, controllerIndex, distance) {
   const result = evaluateHit(distance);
   if (!result) return;
 
-  target.userData.hit = true;
-  target.visible = false;
-
-  state.combo++;
+  // target.visible and .hit already set by collision code
+  // WEAK hits break combo, other hits build it
+  if (result.breaksCombo) {
+    state.combo = 0;
+  } else {
+    state.combo++;
+  }
   if (state.combo > state.maxCombo) state.maxCombo = state.combo;
 
   const comboMultiplier = 1 + Math.floor(state.combo / 10) * 0.5;
@@ -990,6 +995,9 @@ function gameLoop(timestamp, frame) {
       // Check if close enough AND moving fast enough (actual punch)
       const speed = state.controllerVelocities[c].length();
       if (dist < CONFIG.HIT_DISTANCE && speed > CONFIG.MIN_PUNCH_VELOCITY) {
+        // Always hide target on collision — even if scoring says it's too far for points
+        target.userData.hit = true;
+        target.visible = false;
         onHit(target, c, dist);
         playHitSound();
         state.targets.splice(i, 1);
