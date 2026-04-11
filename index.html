@@ -470,9 +470,10 @@ function onHit(target, controllerIndex, distance) {
   // Anchor ring — ideal hit position for this target
   createAnchor(target.userData.idealX, target.userData.idealY, target.userData.hand);
 
-  // Impact mark — single splat at actual hit position, perpendicular to punch
+  // Impact mark — hand color (blue/red), opacity encodes precision
+  const handColor = controllerIndex === 0 ? CONFIG.LEFT_COLOR : CONFIG.RIGHT_COLOR;
   const punchVel = state.controllerVelocities[controllerIndex];
-  createImpactMark(target.position.clone(), punchVel, result.color, result.label);
+  createImpactMark(target.position.clone(), punchVel, handColor, result.label);
 
   // Show feedback text
   const feedbackPos = target.position.clone();
@@ -492,7 +493,9 @@ function onMiss(target) {
 
   // Anchor ring at ideal position + red splat at miss position
   createAnchor(target.userData.idealX, target.userData.idealY, target.userData.hand);
-  createMissMark(target.position);
+  const missHandColor = target.userData.hand === 0 ? CONFIG.LEFT_COLOR :
+                        target.userData.hand === 1 ? CONFIG.RIGHT_COLOR : 0x666666;
+  createMissMark(target.position, missHandColor);
 
   const feedbackPos = target.position.clone();
   feedbackPos.y += 0.2;
@@ -594,7 +597,7 @@ function createAnchor(targetX, targetY, hand) {
   state.inkResidues.push(anchor);
 }
 
-// Create a single impact mark at hit position, oriented perpendicular to punch
+// Create a single impact mark — faces player, opacity = precision
 function createImpactMark(position, punchVelocity, color, hitQuality) {
   // Remove oldest if over cap
   while (state.inkResidues.length >= CONFIG.MAX_RESIDUE_MARKS) {
@@ -604,11 +607,16 @@ function createImpactMark(position, punchVelocity, color, hitQuality) {
     oldest.material.dispose();
   }
 
+  // Opacity encodes quality: PERFECT = deep, WEAK = faint
+  const qualityOpacity = hitQuality === 'PERFECT' ? 0.95 :
+                         hitQuality === 'GREAT'   ? 0.75 :
+                         hitQuality === 'GOOD'    ? 0.5  : 0.25;
+
   const texture = getSplatTexture(color);
   const mat = new THREE.MeshBasicMaterial({
     map: texture,
     transparent: true,
-    opacity: 0.9,
+    opacity: qualityOpacity,
     depthWrite: false,
     side: THREE.DoubleSide,
   });
@@ -616,28 +624,26 @@ function createImpactMark(position, punchVelocity, color, hitQuality) {
   const splat = new THREE.Mesh(inkSplatGeo, mat);
   splat.position.copy(position);
 
-  // Orient perpendicular to punch direction — like a stamp the fist leaves
-  const punchSpeed = punchVelocity.length();
-  if (punchSpeed > 0.1) {
-    tmpVec.copy(position).add(punchVelocity);
-    splat.lookAt(tmpVec);
-  } else {
-    // Fallback: face toward player
-    splat.lookAt(position.x, position.y, position.z + 1);
-  }
+  // Face toward the player (horizontal to line of sight)
+  splat.lookAt(position.x, position.y, position.z + 1);
 
-  // Size based on hit quality
+  // Size based on hit quality + stretch along punch direction
   const baseSize = CONFIG.INK_SPLAT_BASE_SIZE;
   const qualityMult = hitQuality === 'PERFECT' ? 1.5 :
                       hitQuality === 'GREAT' ? 1.2 :
                       hitQuality === 'GOOD' ? 0.9 : 0.6;
 
-  // Stretch along punch force
+  const punchSpeed = punchVelocity.length();
   const stretchAmount = Math.min(1 + (punchSpeed / 3) * CONFIG.INK_SPLAT_STRETCH, 4.0);
+
+  // Project punch onto mark's local plane for rotation
+  const angle = Math.atan2(punchVelocity.y, punchVelocity.x);
+  splat.rotation.z = angle;
+
   const sizeBase = baseSize * qualityMult;
   splat.scale.set(
-    sizeBase * stretchAmount,  // stretched along major axis
-    sizeBase,                  // perpendicular
+    sizeBase * stretchAmount,
+    sizeBase,
     1
   );
 
@@ -646,15 +652,15 @@ function createImpactMark(position, punchVelocity, color, hitQuality) {
     lifetime: CONFIG.INK_RESIDUE_LIFETIME * 1000,
     fadeTime: CONFIG.INK_RESIDUE_FADE_TIME * 1000,
     hitQuality: hitQuality,
-    baseOpacity: 0.9,
+    baseOpacity: qualityOpacity,
   };
 
   scene.add(splat);
   state.inkResidues.push(splat);
 }
 
-// Miss mark at target position, facing player
-function createMissMark(position) {
+// Miss mark — very faint hand color, facing player
+function createMissMark(position, handColor) {
   while (state.inkResidues.length >= CONFIG.MAX_RESIDUE_MARKS) {
     const oldest = state.inkResidues.shift();
     scene.remove(oldest);
@@ -662,11 +668,11 @@ function createMissMark(position) {
     oldest.material.dispose();
   }
 
-  const texture = getSplatTexture(CONFIG.MISS_COLOR);
+  const texture = getSplatTexture(handColor);
   const mat = new THREE.MeshBasicMaterial({
     map: texture,
     transparent: true,
-    opacity: 0.9,
+    opacity: 0.15,
     depthWrite: false,
     side: THREE.DoubleSide,
   });
@@ -683,7 +689,7 @@ function createMissMark(position) {
     lifetime: CONFIG.INK_RESIDUE_LIFETIME * 1000,
     fadeTime: CONFIG.INK_RESIDUE_FADE_TIME * 1000,
     hitQuality: 'MISS',
-    baseOpacity: 0.9,
+    baseOpacity: 0.15,
   };
 
   scene.add(splat);
