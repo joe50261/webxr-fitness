@@ -392,9 +392,9 @@ function spawnTarget() {
     const spawnY = pos.y + (Math.random() - 0.5) * 0.1;
     target.position.set(spawnX, spawnY, -CONFIG.SPAWN_DISTANCE);
 
-    // Store ideal hit position (same X/Y, target travels straight on Z)
-    target.userData.idealX = spawnX;
-    target.userData.idealY = spawnY;
+    // Store ideal hit position — fixed pattern position, no randomness
+    target.userData.idealX = pos.x;
+    target.userData.idealY = pos.y;
     target.visible = true;
     target.scale.setScalar(0.01);
     state.targets.push(target);
