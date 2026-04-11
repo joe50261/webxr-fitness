@@ -564,15 +564,14 @@ function onMiss(target) {
 // Thin line geometry — 1 unit tall, very narrow
 const inkLineGeo = new THREE.PlaneGeometry(0.01, 1);
 
-// Create a thin line from hit position toward anchor — shows "you were off this way"
-function createImpactMark(position, anchorPos, color, hitQuality) {
+// Draw a thin line from anchor center to hit position
+function createImpactMark(hitPos, anchorPos, color, hitQuality) {
   while (state.inkResidues.length >= CONFIG.MAX_RESIDUE_MARKS) {
     const oldest = state.inkResidues.shift();
     scene.remove(oldest);
     oldest.material.dispose();
   }
 
-  // Opacity encodes quality
   const qualityOpacity = hitQuality === 'PERFECT' ? 0.95 :
                          hitQuality === 'GREAT'   ? 0.75 :
                          hitQuality === 'GOOD'    ? 0.5  : 0.25;
@@ -583,22 +582,24 @@ function createImpactMark(position, anchorPos, color, hitQuality) {
   });
 
   const line = new THREE.Mesh(inkLineGeo, mat);
-  line.position.copy(position);
 
-  // Offset vector from hit position to anchor (ideal position)
-  const dx = anchorPos.x - position.x;
-  const dy = anchorPos.y - position.y;
-  const dz = anchorPos.z - position.z;
-  const offset = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  // Midpoint between anchor and hit
+  const mx = (anchorPos.x + hitPos.x) / 2;
+  const my = (anchorPos.y + hitPos.y) / 2;
+  const mz = (anchorPos.z + hitPos.z) / 2;
+  line.position.set(mx, my, mz);
 
-  // Line length = distance to anchor (capped). PERFECT = tiny dot, far off = long line
-  const lineLength = Math.max(0.02, Math.min(offset, 0.5));
+  // Length = distance between anchor and hit
+  const dx = hitPos.x - anchorPos.x;
+  const dy = hitPos.y - anchorPos.y;
+  const dz = hitPos.z - anchorPos.z;
+  const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  const lineLength = Math.max(0.01, dist);
 
-  // Direction from hit → anchor projected onto frontal plane (XY)
+  // Angle from anchor → hit projected onto frontal plane
   const angle = Math.atan2(dy, dx);
 
-  // Face toward player, rotate line to point toward anchor
-  line.lookAt(position.x, position.y, position.z + 1);
+  line.lookAt(mx, my, mz + 1);
   line.rotation.z = angle + Math.PI / 2;
   line.scale.set(1, lineLength, 1);
 
