@@ -111,15 +111,27 @@ const CONFIG = {
   INK_RESIDUE_FADE_TIME: 5,    // seconds to fade out
   MAX_RESIDUE_MARKS: 100,      // cap for performance
 
-  // Anchor point — ideal hit zone
-  IDEAL_HIT_Z: -0.3,           // Z where perfect timing punch lands (arm's reach)
+  // Anchor point — ideal hit zone (defaults, overwritten by calibration)
   ANCHOR_SIZE: 0.12,           // radius of anchor ring
+
+  // Calibration
+  CALIBRATION_HOLD_TIME: 3.0,  // seconds to hold steady
+  CALIBRATION_VELOCITY_THRESHOLD: 0.15, // m/s — below this = "steady"
 };
 
 // ─────────────────────────────────────────────
 // GAME STATE
 // ─────────────────────────────────────────────
+// Calibrated anchor positions — set during calibration phase
+const calibration = {
+  done: false,
+  left:  new THREE.Vector3(-0.5, 1.3, -0.3),  // defaults
+  right: new THREE.Vector3(0.5, 1.3, -0.3),
+  steadyStart: [0, 0],  // timestamp when each hand became steady
+};
+
 const state = {
+  isCalibrating: false,
   score: 0,
   combo: 0,
   maxCombo: 0,
@@ -541,24 +553,39 @@ function generateSplatTexture(color) {
   return texture;
 }
 
-// ── Permanent anchor rings — fixed reference points at all pattern positions ──
+// ── Anchor rings — two persistent meshes, positioned by calibration ──
 const anchorRingGeo = new THREE.RingGeometry(0.9, 1.0, 24);
-const anchorMat = new THREE.MeshBasicMaterial({
-  color: 0xffffff, transparent: true, opacity: 0.35,
+const anchorMatLeft = new THREE.MeshBasicMaterial({
+  color: CONFIG.LEFT_COLOR, transparent: true, opacity: 0.4,
+  depthWrite: false, side: THREE.DoubleSide,
+});
+const anchorMatRight = new THREE.MeshBasicMaterial({
+  color: CONFIG.RIGHT_COLOR, transparent: true, opacity: 0.4,
   depthWrite: false, side: THREE.DoubleSide,
 });
 
-function createPermanentAnchors() {
-  const z = CONFIG.IDEAL_HIT_Z;
-  for (const x of [-0.5, 0.5]) {
-    const anchor = new THREE.Mesh(anchorRingGeo, anchorMat);
-    anchor.position.set(x, 1.3, z);
-    anchor.lookAt(x, 1.3, z + 1);
+const anchors = [null, null]; // [left, right]
+function createAnchors() {
+  for (let i = 0; i < 2; i++) {
+    const mat = i === 0 ? anchorMatLeft : anchorMatRight;
+    const anchor = new THREE.Mesh(anchorRingGeo, mat);
+    const pos = i === 0 ? calibration.left : calibration.right;
+    anchor.position.copy(pos);
+    anchor.lookAt(pos.x, pos.y, pos.z + 1);
     anchor.scale.setScalar(CONFIG.ANCHOR_SIZE);
     scene.add(anchor);
+    anchors[i] = anchor;
   }
 }
-createPermanentAnchors();
+createAnchors();
+
+function updateAnchorPositions() {
+  for (let i = 0; i < 2; i++) {
+    const pos = i === 0 ? calibration.left : calibration.right;
+    anchors[i].position.copy(pos);
+    anchors[i].lookAt(pos.x, pos.y, pos.z + 1);
+  }
+}
 
 // Create a single impact mark — faces player, opacity = precision
 function createImpactMark(position, punchVelocity, color, hitQuality) {
@@ -827,8 +854,123 @@ const cameraWorldPos = new THREE.Vector3();
 const ctrlWorldPos = [new THREE.Vector3(), new THREE.Vector3()];
 const hudOffset = new THREE.Vector3(0, 1.2, 0);
 
+// ─────────────────────────────────────────────
+// CALIBRATION — extend arms forward, hold steady to set anchor positions
+// ─────────────────────────────────────────────
+let calibHUD = null;
+const calibCanvas = document.createElement('canvas');
+calibCanvas.width = 512; calibCanvas.height = 128;
+const calibCtx = calibCanvas.getContext('2d');
+const calibTexture = new THREE.CanvasTexture(calibCanvas);
+
+function createCalibHUD() {
+  const mat = new THREE.SpriteMaterial({ map: calibTexture, transparent: true, depthTest: false });
+  calibHUD = new THREE.Sprite(mat);
+  calibHUD.scale.set(1.5, 0.4, 1);
+  calibHUD.visible = false;
+  scene.add(calibHUD);
+}
+createCalibHUD();
+
+function updateCalibHUD(progress, text) {
+  const ctx = calibCtx;
+  ctx.clearRect(0, 0, 512, 128);
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.roundRect(10, 10, 492, 108, 12);
+  ctx.fill();
+
+  // Progress bar
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.fillRect(30, 85, 452, 16);
+  ctx.fillStyle = progress >= 1 ? '#00ff88' : '#ff6b35';
+  ctx.fillRect(30, 85, 452 * Math.min(progress, 1), 16);
+
+  // Text
+  ctx.font = 'bold 28px Segoe UI, sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.fillText(text, 256, 60);
+  calibTexture.needsUpdate = true;
+}
+
+function calibrationLoop(delta) {
+  const now = performance.now();
+
+  // Get controller world positions
+  for (let i = 0; i < 2; i++) {
+    controllers[i].getWorldPosition(ctrlWorldPos[i]);
+  }
+
+  // Anchors follow controllers in real-time during calibration
+  calibration.left.copy(ctrlWorldPos[0]);
+  calibration.right.copy(ctrlWorldPos[1]);
+  updateAnchorPositions();
+
+  // Check velocity — are both hands steady?
+  let bothSteady = true;
+  for (let i = 0; i < 2; i++) {
+    const speed = state.controllerVelocities[i].length();
+    if (speed > CONFIG.CALIBRATION_VELOCITY_THRESHOLD) {
+      calibration.steadyStart[i] = now;
+      bothSteady = false;
+    }
+  }
+
+  // Calculate hold progress
+  const minSteady = Math.min(
+    now - calibration.steadyStart[0],
+    now - calibration.steadyStart[1]
+  );
+  const holdProgress = minSteady / (CONFIG.CALIBRATION_HOLD_TIME * 1000);
+
+  // Position calibration HUD in front of camera
+  camera.getWorldPosition(cameraWorldPos);
+  tmpVec.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  calibHUD.position.copy(cameraWorldPos).add(tmpVec.multiplyScalar(2.0)).add(hudOffset);
+  calibHUD.quaternion.copy(camera.quaternion);
+  calibHUD.visible = true;
+
+  if (holdProgress >= 1 && bothSteady) {
+    // Calibration complete — lock positions
+    calibration.done = true;
+    state.isCalibrating = false;
+    calibHUD.visible = false;
+
+    // Start game
+    state.isPlaying = true;
+    state.sessionStart = performance.now();
+    state.lastBeatTime = performance.now();
+
+    // Update spawn patterns with calibrated positions
+    SPAWN_PATTERNS[0].positions[0].x = calibration.left.x;
+    SPAWN_PATTERNS[0].positions[0].y = calibration.left.y;
+    SPAWN_PATTERNS[1].positions[0].x = calibration.right.x;
+    SPAWN_PATTERNS[1].positions[0].y = calibration.right.y;
+
+    updateAnchorPositions();
+    return;
+  }
+
+  updateCalibHUD(holdProgress, bothSteady ? 'Hold steady...' : 'Extend arms forward');
+
+  // Update controller velocities during calibration (reuse gameLoop logic)
+  for (let i = 0; i < 2; i++) {
+    if (state.controllerPrevPosInit[i]) {
+      state.controllerVelocities[i].subVectors(ctrlWorldPos[i], state.controllerPrevPos[i]).divideScalar(delta);
+    }
+    state.controllerPrevPos[i].copy(ctrlWorldPos[i]);
+    state.controllerPrevPosInit[i] = true;
+  }
+}
+
 function gameLoop(timestamp, frame) {
   const delta = clock.getDelta();
+
+  // Calibration phase runs before gameplay
+  if (state.isCalibrating) {
+    calibrationLoop(delta);
+    return;
+  }
 
   if (!state.isPlaying) return;
 
@@ -1024,9 +1166,11 @@ enterBtn.addEventListener('click', async () => {
     await renderer.xr.setSession(session);
 
     overlay.style.display = 'none';
-    state.isPlaying = true;
-    state.sessionStart = performance.now();
-    state.lastBeatTime = performance.now();
+
+    // Enter calibration phase — game starts after calibration completes
+    state.isCalibrating = true;
+    calibration.steadyStart[0] = performance.now();
+    calibration.steadyStart[1] = performance.now();
 
     session.addEventListener('end', () => {
       state.isPlaying = false;
