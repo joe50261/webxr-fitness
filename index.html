@@ -104,6 +104,18 @@ const CONFIG = {
   GREAT_COLOR: 0x00ff88,
   GOOD_COLOR: 0x44aaff,
   MISS_COLOR: 0xff2222,
+
+  // Ink splatter
+  INK_DROPLET_COUNT: 30,       // number of ink droplets per hit
+  INK_SPLAT_COUNT: 6,          // number of wall/floor splat marks
+  INK_GRAVITY: -4.0,           // gravity for ink droplets
+  INK_INITIAL_SPEED: 4.0,      // base ejection speed
+  INK_DROPLET_SIZE: 0.03,      // size of flying droplets
+  INK_SPLAT_MIN_SIZE: 0.08,    // splat mark min radius
+  INK_SPLAT_MAX_SIZE: 0.25,    // splat mark max radius
+  INK_RESIDUE_LIFETIME: 30,    // seconds before residue fades
+  INK_RESIDUE_FADE_TIME: 5,    // seconds to fade out at end of life
+  MAX_RESIDUE_MARKS: 150,      // cap to prevent perf issues
 };
 
 // ─────────────────────────────────────────────
@@ -125,6 +137,8 @@ const state = {
   controllerVelocities: [new THREE.Vector3(), new THREE.Vector3()],
   controllerPrevPos: [new THREE.Vector3(), new THREE.Vector3()],
   trailPoints: [[], []],  // trail effect for controllers
+  inkDroplets: [],         // flying ink particles
+  inkResidues: [],         // splat marks on surfaces
 };
 
 // ─────────────────────────────────────────────
@@ -420,8 +434,11 @@ function onHit(target, controllerIndex, distance) {
     }
   }
 
-  // Hit explosion particles
-  createHitEffect(target.position.clone(), result.color);
+  // Ink splatter explosion — pass punch velocity for directional spray
+  const punchVel = state.controllerVelocities[controllerIndex].clone();
+  createHitEffect(target.position.clone(), result.color, punchVel, result.label);
+  // Additive flash burst (brief, complementary to ink)
+  createOldParticleEffect(target.position.clone(), result.color);
 
   // Show feedback text
   const feedbackPos = target.position.clone();
@@ -445,40 +462,274 @@ function onMiss(target) {
 }
 
 // ─────────────────────────────────────────────
-// PARTICLE EFFECTS
+// INK SPLATTER SYSTEM
 // ─────────────────────────────────────────────
+
+// Shared geometries for ink
+const inkDropGeo = new THREE.SphereGeometry(1, 6, 6); // scaled per droplet
+const inkSplatGeo = new THREE.CircleGeometry(1, 12);   // scaled per splat
+
+// Create a procedural ink splat texture (irregular blob)
+function createInkSplatTexture(color) {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+
+  const cx = size / 2, cy = size / 2;
+  const hex = '#' + color.toString(16).padStart(6, '0');
+
+  // Main blob — irregular radial shape
+  ctx.beginPath();
+  const points = 12 + Math.floor(Math.random() * 8);
+  for (let i = 0; i <= points; i++) {
+    const angle = (i / points) * Math.PI * 2;
+    const radius = (size * 0.3) + Math.random() * (size * 0.15);
+    const x = cx + Math.cos(angle) * radius;
+    const y = cy + Math.sin(angle) * radius;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+
+  // Radial gradient for depth
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, size * 0.45);
+  grad.addColorStop(0, hex);
+  grad.addColorStop(0.6, hex);
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Smaller satellite drips
+  for (let i = 0; i < 5 + Math.floor(Math.random() * 5); i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const dist = size * 0.3 + Math.random() * size * 0.15;
+    const r = 2 + Math.random() * 6;
+    ctx.beginPath();
+    ctx.arc(cx + Math.cos(angle) * dist, cy + Math.sin(angle) * dist, r, 0, Math.PI * 2);
+    ctx.fillStyle = hex;
+    ctx.fill();
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  return texture;
+}
+
+// Spawn flying ink droplets from hit point
+function createInkSplatter(position, punchVelocity, color, hitQuality) {
+  const count = CONFIG.INK_DROPLET_COUNT;
+  // More droplets & bigger for PERFECT, fewer & smaller for GOOD
+  const qualityScale = hitQuality === 'PERFECT' ? 1.3 :
+                       hitQuality === 'GREAT' ? 1.0 : 0.7;
+
+  // Normalize punch direction (ink flies opposite to punch)
+  const punchDir = punchVelocity.clone().normalize();
+  const punchSpeed = punchVelocity.length();
+
+  for (let i = 0; i < Math.round(count * qualityScale); i++) {
+    // Spray direction: mostly along punch direction with spread
+    const spread = 0.6 + (1 - qualityScale) * 0.4; // tighter spread for better hits
+    const dir = new THREE.Vector3(
+      punchDir.x + (Math.random() - 0.5) * spread,
+      punchDir.y + (Math.random() - 0.5) * spread + 0.3, // slight upward bias
+      punchDir.z + (Math.random() - 0.5) * spread
+    ).normalize();
+
+    const speed = CONFIG.INK_INITIAL_SPEED * (0.5 + Math.random()) * qualityScale;
+    // Scale velocity with actual punch speed
+    const velScale = Math.min(punchSpeed / 3, 2.0);
+
+    const droplet = new THREE.Mesh(
+      inkDropGeo,
+      new THREE.MeshStandardMaterial({
+        color: color,
+        emissive: color,
+        emissiveIntensity: 0.3,
+        roughness: 0.3,
+        metalness: 0.1,
+      })
+    );
+
+    const s = CONFIG.INK_DROPLET_SIZE * (0.5 + Math.random() * 0.8) * qualityScale;
+    droplet.scale.setScalar(s);
+    droplet.position.copy(position);
+
+    droplet.userData = {
+      velocity: dir.multiplyScalar(speed * velScale),
+      life: 1.5 + Math.random(), // seconds until it "lands"
+      color: color,
+      size: s,
+      hitQuality: hitQuality,
+      hasLanded: false,
+    };
+
+    scene.add(droplet);
+    state.inkDroplets.push(droplet);
+  }
+}
+
+// Create a residue splat mark at a position/surface
+function createInkResidue(position, normal, color, size, hitQuality) {
+  // Remove oldest if over cap
+  while (state.inkResidues.length >= CONFIG.MAX_RESIDUE_MARKS) {
+    const oldest = state.inkResidues.shift();
+    scene.remove(oldest);
+    oldest.material.map?.dispose();
+    oldest.material.dispose();
+  }
+
+  const texture = createInkSplatTexture(color);
+  const mat = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    opacity: 0.85,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.NormalBlending,
+  });
+
+  const splatSize = CONFIG.INK_SPLAT_MIN_SIZE +
+    Math.random() * (CONFIG.INK_SPLAT_MAX_SIZE - CONFIG.INK_SPLAT_MIN_SIZE);
+  const splat = new THREE.Mesh(inkSplatGeo, mat);
+  splat.scale.setScalar(splatSize * size);
+  splat.position.copy(position);
+
+  // Orient to surface normal
+  if (normal) {
+    splat.lookAt(position.clone().add(normal));
+  }
+
+  // Slight random rotation for variety
+  splat.rotation.z = Math.random() * Math.PI * 2;
+
+  splat.userData = {
+    spawnTime: performance.now(),
+    lifetime: CONFIG.INK_RESIDUE_LIFETIME * 1000,
+    fadeTime: CONFIG.INK_RESIDUE_FADE_TIME * 1000,
+    hitQuality: hitQuality,
+    baseOpacity: 0.85,
+  };
+
+  scene.add(splat);
+  state.inkResidues.push(splat);
+}
+
+// When a hit occurs — create the main ink burst + immediate splat at hit point
+function createHitEffect(position, color, punchVelocity, hitQuality) {
+  // 1) Flying ink droplets
+  createInkSplatter(position, punchVelocity || new THREE.Vector3(0, 0, -2), color, hitQuality || 'GREAT');
+
+  // 2) Immediate central splat at hit point (the "impact mark")
+  const impactSize = hitQuality === 'PERFECT' ? 1.5 :
+                     hitQuality === 'GREAT' ? 1.2 : 0.8;
+  createInkResidue(
+    position.clone(),
+    new THREE.Vector3(0, 0, 1), // facing player
+    color,
+    impactSize,
+    hitQuality || 'GREAT'
+  );
+}
+
+// Update ink droplets — physics simulation
+function updateInkSystem(delta) {
+  const now = performance.now();
+
+  // ── Flying droplets ──
+  for (let i = state.inkDroplets.length - 1; i >= 0; i--) {
+    const d = state.inkDroplets[i];
+
+    // Apply gravity
+    d.userData.velocity.y += CONFIG.INK_GRAVITY * delta;
+
+    // Move
+    d.position.x += d.userData.velocity.x * delta;
+    d.position.y += d.userData.velocity.y * delta;
+    d.position.z += d.userData.velocity.z * delta;
+
+    // Stretch droplet in velocity direction (teardrop effect)
+    const speed = d.userData.velocity.length();
+    if (speed > 1) {
+      const stretch = Math.min(speed * 0.15, 2.5);
+      d.scale.set(d.userData.size, d.userData.size * stretch, d.userData.size);
+      d.lookAt(d.position.clone().add(d.userData.velocity));
+    }
+
+    d.userData.life -= delta;
+
+    // Check if hit floor (y ≈ 0) or timed out
+    const hitFloor = d.position.y <= 0.02;
+    const timedOut = d.userData.life <= 0;
+
+    if (hitFloor || timedOut) {
+      // Create residue splat where it landed
+      const splatPos = d.position.clone();
+      let normal;
+      if (hitFloor) {
+        splatPos.y = 0.015; // just above floor
+        normal = new THREE.Vector3(0, 1, 0);
+      } else {
+        normal = d.userData.velocity.clone().normalize().negate();
+      }
+
+      const splatScale = 0.6 + speed * 0.1;
+      createInkResidue(splatPos, normal, d.userData.color, splatScale, d.userData.hitQuality);
+
+      // Remove droplet
+      scene.remove(d);
+      d.material.dispose();
+      state.inkDroplets.splice(i, 1);
+    }
+  }
+
+  // ── Residue fade over time ──
+  for (let i = state.inkResidues.length - 1; i >= 0; i--) {
+    const r = state.inkResidues[i];
+    const age = now - r.userData.spawnTime;
+    const remaining = r.userData.lifetime - age;
+
+    if (remaining <= 0) {
+      // Remove
+      scene.remove(r);
+      r.material.map?.dispose();
+      r.material.dispose();
+      state.inkResidues.splice(i, 1);
+    } else if (remaining < r.userData.fadeTime) {
+      // Fade out
+      r.material.opacity = r.userData.baseOpacity * (remaining / r.userData.fadeTime);
+    }
+  }
+}
+
+// Legacy wrapper for existing particle systems (keep for non-ink effects)
 const particleSystems = [];
 
-function createHitEffect(position, color) {
-  const count = 15;
+function createOldParticleEffect(position, color) {
+  // Minimal flash burst (supplement to ink)
+  const count = 8;
   const geo = new THREE.BufferGeometry();
   const positions = new Float32Array(count * 3);
   const velocities = [];
-
   for (let i = 0; i < count; i++) {
     positions[i * 3] = position.x;
     positions[i * 3 + 1] = position.y;
     positions[i * 3 + 2] = position.z;
     velocities.push(new THREE.Vector3(
-      (Math.random() - 0.5) * 3,
-      (Math.random() - 0.5) * 3,
-      (Math.random() - 0.5) * 3
+      (Math.random() - 0.5) * 4,
+      (Math.random() - 0.5) * 4,
+      (Math.random() - 0.5) * 4
     ));
   }
-
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   const mat = new THREE.PointsMaterial({
-    color: color,
-    size: 0.05,
-    transparent: true,
-    opacity: 1,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
+    color, size: 0.04, transparent: true, opacity: 1,
+    blending: THREE.AdditiveBlending, depthWrite: false,
   });
-
   const points = new THREE.Points(geo, mat);
   points.userData.velocities = velocities;
-  points.userData.life = 1.0;
+  points.userData.life = 0.4; // short flash
   scene.add(points);
   particleSystems.push(points);
 }
@@ -696,10 +947,13 @@ function gameLoop(timestamp, frame) {
     }
   }
 
-  // ── Update particle systems ──
+  // ── Update ink splatter system ──
+  updateInkSystem(delta);
+
+  // ── Update legacy particle systems (flash bursts) ──
   for (let i = particleSystems.length - 1; i >= 0; i--) {
     const ps = particleSystems[i];
-    ps.userData.life -= delta * 2;
+    ps.userData.life -= delta * 3;
     if (ps.userData.life <= 0) {
       scene.remove(ps);
       ps.geometry.dispose();
@@ -713,7 +967,7 @@ function gameLoop(timestamp, frame) {
       posAttr.array[j * 3] += ps.userData.velocities[j].x * delta;
       posAttr.array[j * 3 + 1] += ps.userData.velocities[j].y * delta;
       posAttr.array[j * 3 + 2] += ps.userData.velocities[j].z * delta;
-      ps.userData.velocities[j].y -= 3 * delta; // gravity
+      ps.userData.velocities[j].y -= 3 * delta;
     }
     posAttr.needsUpdate = true;
   }
