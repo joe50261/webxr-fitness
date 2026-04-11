@@ -75,14 +75,14 @@ import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFa
 const CONFIG = {
   // Target spawning
   SPAWN_DISTANCE: 5,        // meters in front of player
-  HIT_DISTANCE: 1.0,        // how close to reach target
+  HIT_DISTANCE: 0.6,        // entry zone radius (triggers tracking)
   TARGET_SPEED: 3.0,        // m/s travel toward player
   TARGET_RADIUS: 0.15,      // target sphere radius
 
-  // Scoring
-  PERFECT_THRESHOLD: 0.25,  // meters — distance for "PERFECT"
-  GREAT_THRESHOLD: 0.5,     // "GREAT"
-  GOOD_THRESHOLD: 0.75,     // "GOOD"
+  // Scoring — evaluated at closest approach, not first contact
+  PERFECT_THRESHOLD: 0.08,  // meters — nearly dead center
+  GREAT_THRESHOLD: 0.15,    // fist-width precision
+  GOOD_THRESHOLD: 0.3,      // reasonable aim
   MISS_DISTANCE: -0.5,      // passed behind player = miss
 
   // BPM & rhythm
@@ -408,6 +408,7 @@ function spawnTarget() {
     target.userData.ring.material = targetMats[variant].ring;
     target.userData.hand = pos.hand;
     target.userData.hit = false;
+    target.userData.tracking = null;
     target.userData.spawnTime = performance.now();
 
     // Punch type and expected direction
@@ -1097,30 +1098,51 @@ function gameLoop(timestamp, frame) {
       if (target.scale.x > 1) target.scale.setScalar(1);
     }
 
-    // Collision detection with controllers (check BEFORE miss)
-    // Early exit: skip expensive distance calcs if target is still far away
+    // ── Closest-approach hit detection ──
+    // Track minimum distance while controller is in range.
+    // Score when controller starts moving away (distance increasing).
     if (target.position.z < -CONFIG.HIT_DISTANCE * 2) continue;
-    let wasHit = false;
+
     for (let c = 0; c < controllers.length; c++) {
-      // Check hand preference
       if (target.userData.hand !== -1 && target.userData.hand !== c) continue;
 
       const dist = ctrlWorldPos[c].distanceTo(target.position);
-
-      // Check if close enough AND moving fast enough (actual punch)
       const speed = state.controllerVelocities[c].length();
+      const tracking = target.userData.tracking;
+
       if (dist < CONFIG.HIT_DISTANCE && speed > CONFIG.MIN_PUNCH_VELOCITY) {
-        // Always hide target on collision — even if scoring says it's too far for points
+        if (!tracking) {
+          // Enter hit zone — start tracking closest approach
+          target.userData.tracking = { controller: c, minDist: dist, frames: 0 };
+        } else if (tracking.controller === c) {
+          // Still in zone — update minimum distance
+          if (dist < tracking.minDist) {
+            tracking.minDist = dist;
+            tracking.frames = 0;
+          } else {
+            tracking.frames++;
+          }
+          // Distance increasing for 2+ frames → fist passed closest point, finalize
+          if (tracking.frames >= 2) {
+            target.userData.hit = true;
+            target.visible = false;
+            onHit(target, c, tracking.minDist);
+            playHitSound();
+            state.targets.splice(i, 1);
+            break;
+          }
+        }
+      } else if (tracking && tracking.controller === c) {
+        // Exited hit zone — finalize with best distance achieved
         target.userData.hit = true;
         target.visible = false;
-        onHit(target, c, dist);
+        onHit(target, c, tracking.minDist);
         playHitSound();
         state.targets.splice(i, 1);
-        wasHit = true;
         break;
       }
     }
-    if (wasHit) continue;
+    if (target.userData.hit) continue;
 
     // Check if passed player (miss)
     if (target.position.z > CONFIG.MISS_DISTANCE) {
@@ -1248,7 +1270,7 @@ enterBtn.addEventListener('click', async () => {
 // ─────────────────────────────────────────────
 function initDesktopControls() {
   // Desktop overrides — relax thresholds for easy testing
-  CONFIG.HIT_DISTANCE = 1.5;        // much larger hit zone
+  CONFIG.HIT_DISTANCE = 1.2;        // much larger hit zone
   CONFIG.MIN_PUNCH_VELOCITY = 0.0;  // no speed requirement
   CONFIG.TARGET_SPEED = 2.0;        // slower targets
 
