@@ -68,8 +68,6 @@
 <script type="module">
 import * as THREE from 'three';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
-import { FontLoader } from 'three/addons/loaders/FontLoader.js';
-import { TextGeometry } from 'three/addons/geometries/TextGeometry.js';
 
 // ─────────────────────────────────────────────
 // CONFIG
@@ -126,7 +124,7 @@ const state = {
   score: 0,
   combo: 0,
   maxCombo: 0,
-  hits: { perfect: 0, great: 0, good: 0, miss: 0 },
+  hits: { perfect: 0, great: 0, good: 0, weak: 0, miss: 0 },
   totalPunches: 0,
   calories: 0,
   sessionStart: 0,
@@ -137,6 +135,7 @@ const state = {
   feedbacks: [],          // floating score text
   controllerVelocities: [new THREE.Vector3(), new THREE.Vector3()],
   controllerPrevPos: [new THREE.Vector3(), new THREE.Vector3()],
+  controllerPrevPosInit: [false, false],
   trailPoints: [[], []],  // trail effect for controllers
   inkDroplets: [],         // flying ink particles
   inkResidues: [],         // splat marks on surfaces
@@ -839,7 +838,7 @@ function updateHUD() {
   ctx.fillText(`Cal: ${Math.round(state.calories)} kcal`, 30, 175);
 
   // Accuracy
-  const totalHits = state.hits.perfect + state.hits.great + state.hits.good;
+  const totalHits = state.hits.perfect + state.hits.great + state.hits.good + state.hits.weak;
   const totalAttempts = totalHits + state.hits.miss;
   const accuracy = totalAttempts > 0 ? Math.round((totalHits / totalAttempts) * 100) : 100;
   ctx.fillText(`Accuracy: ${accuracy}%`, 30, 205);
@@ -850,7 +849,8 @@ function updateHUD() {
   ctx.fillStyle = '#ffd700'; ctx.fillText(`Perfect: ${state.hits.perfect}`, 480, 145);
   ctx.fillStyle = '#00ff88'; ctx.fillText(`Great: ${state.hits.great}`, 480, 170);
   ctx.fillStyle = '#44aaff'; ctx.fillText(`Good: ${state.hits.good}`, 480, 195);
-  ctx.fillStyle = '#ff2222'; ctx.fillText(`Miss: ${state.hits.miss}`, 480, 220);
+  ctx.fillStyle = '#886644'; ctx.fillText(`Weak: ${state.hits.weak}`, 480, 220);
+  ctx.fillStyle = '#ff2222'; ctx.fillText(`Miss: ${state.hits.miss}`, 480, 245);
 
   hudTexture.needsUpdate = true;
 }
@@ -925,10 +925,11 @@ function gameLoop(timestamp, frame) {
     const worldPos = new THREE.Vector3();
     ctrl.getWorldPosition(worldPos);
 
-    if (state.controllerPrevPos[i].lengthSq() > 0) {
+    if (state.controllerPrevPosInit[i]) {
       state.controllerVelocities[i].subVectors(worldPos, state.controllerPrevPos[i]).divideScalar(delta);
     }
     state.controllerPrevPos[i].copy(worldPos);
+    state.controllerPrevPosInit[i] = true;
 
     // Update trail
     const trail = ctrl.userData.trail;
@@ -971,14 +972,8 @@ function gameLoop(timestamp, frame) {
     target.rotation.y += delta * 2;
     target.rotation.x += delta * 1.5;
 
-    // Check if passed player (miss)
-    if (target.position.z > CONFIG.MISS_DISTANCE) {
-      onMiss(target);
-      state.targets.splice(i, 1);
-      continue;
-    }
-
-    // Collision detection with controllers
+    // Collision detection with controllers (check BEFORE miss)
+    let wasHit = false;
     for (let c = 0; c < controllers.length; c++) {
       // Check hand preference
       if (target.userData.hand !== -1 && target.userData.hand !== c) continue;
@@ -993,8 +988,17 @@ function gameLoop(timestamp, frame) {
         onHit(target, c, dist);
         playHitSound();
         state.targets.splice(i, 1);
+        wasHit = true;
         break;
       }
+    }
+    if (wasHit) continue;
+
+    // Check if passed player (miss)
+    if (target.position.z > CONFIG.MISS_DISTANCE) {
+      onMiss(target);
+      state.targets.splice(i, 1);
+      continue;
     }
   }
 
@@ -1142,6 +1146,7 @@ function initDesktopControls() {
 
   const mouse = new THREE.Vector2();
   let autoHitEnabled = true;
+  const desktopClock = new THREE.Clock();
 
   // On-screen instructions
   const hint = document.createElement('div');
@@ -1206,7 +1211,7 @@ function initDesktopControls() {
 
   // Desktop game loop — auto-hit nearby targets
   function desktopUpdate() {
-    const dt = clock.getDelta();
+    const dt = desktopClock.getDelta();
 
     // Camera movement
     const speed = 3 * dt;
@@ -1254,9 +1259,10 @@ function showEndScreen() {
       <div><span style="color:#00ff88; font-size:1.5rem;">${Math.round(state.calories)}</span><br><span style="color:#888;">Calories</span></div>
       <div><span style="color:#4488ff; font-size:1.5rem;">${state.totalPunches}</span><br><span style="color:#888;">Punches</span></div>
       <div><span style="color:#ff6b35; font-size:1.5rem;">${
-        Math.round((state.hits.perfect + state.hits.great + state.hits.good) /
-        Math.max(1, state.hits.perfect + state.hits.great + state.hits.good + state.hits.miss) * 100)
+        Math.round((state.hits.perfect + state.hits.great + state.hits.good + state.hits.weak) /
+        Math.max(1, state.hits.perfect + state.hits.great + state.hits.good + state.hits.weak + state.hits.miss) * 100)
       }%</span><br><span style="color:#888;">Accuracy</span></div>
+      <div><span style="color:#886644; font-size:1.5rem;">${state.hits.weak}</span><br><span style="color:#888;">Weak</span></div>
     </div>
     <button id="enter-vr" onclick="location.reload()" style="
       padding:1rem 2.5rem; font-size:1.2rem; border:none; border-radius:50px;
@@ -1285,7 +1291,7 @@ document.addEventListener('keydown', (e) => {
   }
 });
 setInterval(() => {
-  if (debugEl.style.display !== 'none') return;
+  if (debugEl.style.display === 'none') return;
   debugEl.textContent = `FPS: -- | Targets: ${state.targets.length} | Score: ${state.score}`;
 }, 200);
 
