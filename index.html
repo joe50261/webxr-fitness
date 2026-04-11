@@ -624,8 +624,19 @@ function createImpactMark(position, punchVelocity, color, hitQuality) {
   const splat = new THREE.Mesh(inkSplatGeo, mat);
   splat.position.copy(position);
 
-  // Face toward the player (horizontal to line of sight)
-  splat.lookAt(position.x, position.y, position.z + 1);
+  // Normal = cross(punchDir, up)
+  // Jab (-Z) → normal along X (sagittal)
+  // Hook (±X) → normal along Z (frontal)
+  // Mixed punch → mixed angle
+  const punchSpeed = punchVelocity.length();
+  const up = tmpVec.set(0, 1, 0);
+  const normal = tmpVec2.crossVectors(punchVelocity, up);
+  if (normal.lengthSq() < 0.01) {
+    // Near-vertical punch (uppercut) — fallback to sagittal
+    normal.set(1, 0, 0);
+  }
+  normal.normalize();
+  splat.lookAt(position.x + normal.x, position.y + normal.y, position.z + normal.z);
 
   // Size based on hit quality + stretch along punch direction
   const baseSize = CONFIG.INK_SPLAT_BASE_SIZE;
@@ -633,17 +644,13 @@ function createImpactMark(position, punchVelocity, color, hitQuality) {
                       hitQuality === 'GREAT' ? 1.2 :
                       hitQuality === 'GOOD' ? 0.9 : 0.6;
 
-  const punchSpeed = punchVelocity.length();
   const stretchAmount = Math.min(1 + (punchSpeed / 3) * CONFIG.INK_SPLAT_STRETCH, 4.0);
-
-  // Project punch onto mark's local plane for rotation
-  const angle = Math.atan2(punchVelocity.y, punchVelocity.x);
-  splat.rotation.z = angle;
 
   const sizeBase = baseSize * qualityMult;
   splat.scale.set(
-    sizeBase * stretchAmount,
-    sizeBase,
+    sizeBase,                  // width (horizontal on the mark's plane)
+    sizeBase * stretchAmount,  // height (stretch encodes punch force)
+
     1
   );
 
