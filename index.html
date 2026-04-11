@@ -387,10 +387,8 @@ function spawnTarget() {
     target.userData.hit = false;
     target.userData.spawnTime = performance.now();
 
-    // Position: offset X/Y, far on Z
-    const spawnX = pos.x + (Math.random() - 0.5) * 0.2;
-    const spawnY = pos.y + (Math.random() - 0.5) * 0.1;
-    target.position.set(spawnX, spawnY, -CONFIG.SPAWN_DISTANCE);
+    // Position: fixed from pattern, no randomness — consistent for muscle memory
+    target.position.set(pos.x, pos.y, -CONFIG.SPAWN_DISTANCE);
 
     // Store ideal hit position — fixed pattern position, no randomness
     target.userData.idealX = pos.x;
