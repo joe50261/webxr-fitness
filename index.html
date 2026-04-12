@@ -51,7 +51,7 @@
   <p>WebXR 6DoF Rhythm Fighting</p>
   <button id="enter-vr" disabled>Checking WebXR...</button>
   <div id="status"></div>
-  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.5.2-tuning-log</div>
+  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.6.0-engine</div>
 </div>
 
 <div id="debug"></div>
@@ -69,1005 +69,906 @@
 import * as THREE from 'three';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 
-// ─────────────────────────────────────────────
-// CONFIG
-// ─────────────────────────────────────────────
-const CONFIG = {
-  // Target spawning
-  SPAWN_DISTANCE: 5,        // meters in front of player
-  HIT_DISTANCE: 0.6,        // entry zone radius (triggers tracking)
-  TARGET_SPEED: 3.0,        // m/s travel toward player
-  TARGET_RADIUS: 0.15,      // target sphere radius
+// ╔══════════════════════════════════════════════╗
+// ║  ENGINE — pure data & logic, no Three.js     ║
+// ╚══════════════════════════════════════════════╝
+class Engine {
+  constructor() {
+    this.config = {
+      SPAWN_DISTANCE: 5,
+      HIT_DISTANCE: 0.6,
+      TARGET_SPEED: 3.0,
+      TARGET_RADIUS: 0.15,
 
-  // Scoring — evaluated at closest approach, not first contact
-  PERFECT_THRESHOLD: 0.08,  // meters — nearly dead center
-  GREAT_THRESHOLD: 0.15,    // fist-width precision
-  GOOD_THRESHOLD: 0.3,      // reasonable aim
-  MISS_DISTANCE: 2.0,       // well behind player — gives time to hit
+      PERFECT_THRESHOLD: 0.08,
+      GREAT_THRESHOLD: 0.15,
+      GOOD_THRESHOLD: 0.3,
+      MISS_DISTANCE: 2.0,
 
-  // BPM & rhythm
-  BPM: 128,
-  BEATS_PER_SPAWN: 2,       // spawn target every N beats
+      BPM: 128,
+      BEATS_PER_SPAWN: 2,
 
-  // Calorie estimation (rough MET-based)
-  MET_VALUE: 6.0,           // approx MET for combat fitness
-  USER_WEIGHT_KG: 70,       // default, can be changed
+      MET_VALUE: 6.0,
+      USER_WEIGHT_KG: 70,
 
-  // Velocity thresholds for punch detection
-  MIN_PUNCH_VELOCITY: 0.8,  // m/s — minimum speed to count as a punch
+      MIN_PUNCH_VELOCITY: 0.8,
 
-  // Colors
-  LEFT_COLOR: 0x4488ff,
-  RIGHT_COLOR: 0xff4444,
-  PERFECT_COLOR: 0xffd700,
-  GREAT_COLOR: 0x00ff88,
-  GOOD_COLOR: 0x44aaff,
-  MISS_COLOR: 0xff2222,
+      LEFT_COLOR: 0x4488ff,
+      RIGHT_COLOR: 0xff4444,
+      PERFECT_COLOR: 0xffd700,
+      GREAT_COLOR: 0x00ff88,
+      GOOD_COLOR: 0x44aaff,
+      MISS_COLOR: 0xff2222,
 
-  // Ink impact lines
-  INK_RESIDUE_LIFETIME: 30,    // seconds before fade
-  INK_RESIDUE_FADE_TIME: 5,    // seconds to fade out
-  MAX_RESIDUE_MARKS: 100,      // cap for performance
+      INK_RESIDUE_LIFETIME: 30,
+      INK_RESIDUE_FADE_TIME: 5,
+      MAX_RESIDUE_MARKS: 100,
 
-  // Anchor point — ideal hit zone (defaults, overwritten by calibration)
-  ANCHOR_SIZE: 0.12,           // radius of anchor ring
+      ANCHOR_SIZE: 0.12,
+      CALIBRATION_HOLD_TIME: 3.0,
+      CALIBRATION_VELOCITY_THRESHOLD: 0.15,
+    };
 
-  // Calibration
-  CALIBRATION_HOLD_TIME: 3.0,  // seconds to hold steady
-  CALIBRATION_VELOCITY_THRESHOLD: 0.15, // m/s — below this = "steady"
-};
+    this.punchTypes = {
+      jab:      { dir: [0, 0, -1], label: 'JAB' },
+      cross:    { dir: [0, 0, -1], label: 'CROSS' },
+      hook_l:   { dir: [1, 0, 0],  label: 'HOOK' },
+      hook_r:   { dir: [-1, 0, 0], label: 'HOOK' },
+      uppercut: { dir: [0, 1, 0],  label: 'UPPER' },
+    };
 
-// ─────────────────────────────────────────────
-// GAME STATE
-// ─────────────────────────────────────────────
-// Calibrated anchor positions — set during calibration phase
-const calibration = {
-  done: false,
-  left:  new THREE.Vector3(-0.5, 1.3, -0.3),  // defaults
-  right: new THREE.Vector3(0.5, 1.3, -0.3),
-  steadyStart: [0, 0],  // timestamp when each hand became steady
-};
+    this.patterns = [
+      { positions: [{ x: -0.5, y: 1.3, hand: 0, punch: 'jab' }],      name: 'left_jab' },
+      { positions: [{ x: 0.5, y: 1.3, hand: 1, punch: 'cross' }],     name: 'right_cross' },
+      { positions: [{ x: -0.5, y: 1.3, hand: 0, punch: 'hook_l' }],   name: 'left_hook' },
+      { positions: [{ x: 0.5, y: 1.3, hand: 1, punch: 'hook_r' }],    name: 'right_hook' },
+      { positions: [{ x: -0.5, y: 1.3, hand: 0, punch: 'uppercut' }], name: 'left_upper' },
+      { positions: [{ x: 0.5, y: 1.3, hand: 1, punch: 'uppercut' }],  name: 'right_upper' },
+    ];
 
-const state = {
-  isCalibrating: false,
-  score: 0,
-  combo: 0,
-  maxCombo: 0,
-  hits: { perfect: 0, great: 0, good: 0, weak: 0, miss: 0 },
-  totalPunches: 0,
-  calories: 0,
-  sessionStart: 0,
-  isPlaying: false,
-  beatIndex: 0,
-  lastBeatTime: 0,
-  targets: [],
-  feedbacks: [],          // floating score text
-  controllerVelocities: [new THREE.Vector3(), new THREE.Vector3()],
-  controllerPrevPos: [new THREE.Vector3(), new THREE.Vector3()],
-  controllerPrevPosInit: [false, false],
-  trailPoints: [[], []],  // trail effect for controllers
-  inkResidues: [],         // impact marks on surfaces
-};
+    this.calibration = {
+      done: false,
+      left:  { x: -0.5, y: 1.3, z: -0.3 },
+      right: { x: 0.5, y: 1.3, z: -0.3 },
+      steadyStart: [0, 0],
+    };
 
-// ─────────────────────────────────────────────
-// SCENE SETUP
-// ─────────────────────────────────────────────
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.xr.enabled = true;
-renderer.xr.cameraAutoUpdate = true;
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.2;
-document.body.appendChild(renderer.domElement);
+    this.state = {
+      phase: 'idle', // 'idle' | 'calibrating' | 'playing'
+      metronome: false, // true = beat-driven arrival timing
+      score: 0,
+      combo: 0,
+      maxCombo: 0,
+      hits: { perfect: 0, great: 0, good: 0, weak: 0, miss: 0 },
+      totalPunches: 0,
+      calories: 0,
+      sessionStart: 0,
+      beatIndex: 0,
+      lastBeatTime: 0,
+      nextTargetId: 0,
+    };
 
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x050510);
-scene.fog = new THREE.Fog(0x050510, 8, 25);
+    // Controller data (written by renderer/input each frame)
+    this.controllers = [
+      { pos: [0, 0, 0], vel: [0, 0, 0], prevPos: [0, 0, 0], inited: false },
+      { pos: [0, 0, 0], vel: [0, 0, 0], prevPos: [0, 0, 0], inited: false },
+    ];
 
-const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
-camera.position.set(0, 1.6, 0);
+    // Target data (pure objects, no Three.js)
+    this.targets = [];
 
-// Lighting
-const ambientLight = new THREE.AmbientLight(0x222244, 0.5);
-scene.add(ambientLight);
-
-const spotLight = new THREE.SpotLight(0xff6b35, 2, 20, Math.PI / 4, 0.5);
-spotLight.position.set(0, 5, -2);
-scene.add(spotLight);
-
-const pointLight1 = new THREE.PointLight(0x4488ff, 1, 15);
-pointLight1.position.set(-3, 3, -5);
-scene.add(pointLight1);
-
-const pointLight2 = new THREE.PointLight(0xff4444, 1, 15);
-pointLight2.position.set(3, 3, -5);
-scene.add(pointLight2);
-
-// ─────────────────────────────────────────────
-// ENVIRONMENT — Arena
-// ─────────────────────────────────────────────
-function createArena() {
-  // Ground — reflective dark floor
-  const floorGeo = new THREE.PlaneGeometry(20, 20);
-  const floorMat = new THREE.MeshStandardMaterial({
-    color: 0x111122,
-    roughness: 0.2,
-    metalness: 0.8,
-  });
-  const floor = new THREE.Mesh(floorGeo, floorMat);
-  floor.rotation.x = -Math.PI / 2;
-  floor.position.y = 0;
-  scene.add(floor);
-
-  // Grid lines on floor
-  const gridHelper = new THREE.GridHelper(20, 40, 0x222244, 0x111133);
-  gridHelper.position.y = 0.01;
-  scene.add(gridHelper);
-
-  // Side pillars with glow
-  for (let side = -1; side <= 1; side += 2) {
-    const pillarGeo = new THREE.CylinderGeometry(0.1, 0.1, 4, 8);
-    const pillarMat = new THREE.MeshStandardMaterial({
-      color: side === -1 ? 0x4488ff : 0xff4444,
-      emissive: side === -1 ? 0x2244aa : 0xaa2222,
-      emissiveIntensity: 0.5,
-    });
-    for (let z = -8; z <= -2; z += 3) {
-      const pillar = new THREE.Mesh(pillarGeo, pillarMat);
-      pillar.position.set(side * 3, 2, z);
-      scene.add(pillar);
-    }
+    // Hit result log (renderer reads to draw ink lines)
+    this.hitLog = [];
+    // Events
+    this._listeners = {};
   }
 
-  // Spawn lane indicator (two parallel light strips)
-  const stripGeo = new THREE.BoxGeometry(0.05, 0.02, 12);
-  const stripMat = new THREE.MeshStandardMaterial({
-    color: 0xff6b35, emissive: 0xff6b35, emissiveIntensity: 0.3,
-  });
-  for (let side = -1; side <= 1; side += 2) {
-    const strip = new THREE.Mesh(stripGeo, stripMat);
-    strip.position.set(side * 1.5, 0.01, -4);
-    scene.add(strip);
+  // ── Event system ──
+  on(event, fn) {
+    (this._listeners[event] ||= []).push(fn);
+  }
+  emit(event, data) {
+    for (const fn of this._listeners[event] || []) fn(data);
   }
 
-  // ── Back wall (miss targets splat here) ──
-  const wallGeo = new THREE.PlaneGeometry(8, 4);
-  const wallMat = new THREE.MeshStandardMaterial({
-    color: 0x0a0a18,
-    roughness: 0.6,
-    metalness: 0.2,
-    transparent: true,
-    opacity: 0.85,
-  });
-  const backWall = new THREE.Mesh(wallGeo, wallMat);
-  backWall.position.set(0, 2, CONFIG.MISS_DISTANCE + 0.5);
-  backWall.name = 'backWall';
-  scene.add(backWall);
-
-  // Subtle border glow on wall edges
-  const wallBorderGeo = new THREE.EdgesGeometry(wallGeo);
-  const wallBorderMat = new THREE.LineBasicMaterial({
-    color: 0x332244, transparent: true, opacity: 0.5,
-  });
-  const wallBorder = new THREE.LineSegments(wallBorderGeo, wallBorderMat);
-  wallBorder.position.copy(backWall.position);
-  scene.add(wallBorder);
-}
-createArena();
-
-// ─────────────────────────────────────────────
-// CONTROLLERS
-// ─────────────────────────────────────────────
-const controllerModelFactory = new XRControllerModelFactory();
-const controllers = [];
-const controllerGrips = [];
-const glovesMeshes = [];
-
-for (let i = 0; i < 2; i++) {
-  const controller = renderer.xr.getController(i);
-  scene.add(controller);
-  controllers.push(controller);
-
-  // Store inputSource when connected — needed for correct haptic mapping
-  controller.addEventListener('connected', (event) => {
-    controller.userData.inputSource = event.data;
-  });
-  controller.addEventListener('disconnected', () => {
-    controller.userData.inputSource = null;
-  });
-
-  const grip = renderer.xr.getControllerGrip(i);
-  grip.add(controllerModelFactory.createControllerModel(grip));
-  scene.add(grip);
-  controllerGrips.push(grip);
-
-  // Visual "glove" around controller
-  const gloveColor = i === 0 ? CONFIG.LEFT_COLOR : CONFIG.RIGHT_COLOR;
-  const gloveGeo = new THREE.SphereGeometry(0.08, 16, 16);
-  const gloveMat = new THREE.MeshStandardMaterial({
-    color: gloveColor,
-    emissive: gloveColor,
-    emissiveIntensity: 0.4,
-    transparent: true,
-    opacity: 0.7,
-  });
-  const glove = new THREE.Mesh(gloveGeo, gloveMat);
-  controller.add(glove);
-  glovesMeshes.push(glove);
-
-  // Trail line
-  const trailGeo = new THREE.BufferGeometry();
-  const trailPositions = new Float32Array(30 * 3); // 30 points
-  trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
-  const trailMat = new THREE.LineBasicMaterial({
-    color: gloveColor,
-    transparent: true,
-    opacity: 0.4,
-  });
-  const trailLine = new THREE.Line(trailGeo, trailMat);
-  trailLine.frustumCulled = false;
-  scene.add(trailLine);
-  controller.userData.trail = trailLine;
-  controller.userData.trailIndex = 0;
-}
-
-// ─────────────────────────────────────────────
-// PUNCH TYPES — expected velocity direction per type
-// ─────────────────────────────────────────────
-const PUNCH_TYPES = {
-  jab:      { dir: new THREE.Vector3(0, 0, -1), label: 'JAB' },
-  cross:    { dir: new THREE.Vector3(0, 0, -1), label: 'CROSS' },
-  hook_l:   { dir: new THREE.Vector3(1, 0, 0),  label: 'HOOK' },   // left hand hooks right
-  hook_r:   { dir: new THREE.Vector3(-1, 0, 0), label: 'HOOK' },   // right hand hooks left
-  uppercut: { dir: new THREE.Vector3(0, 1, 0),  label: 'UPPER' },
-};
-
-// ─────────────────────────────────────────────
-// TARGET POOL & GENERATION
-// ─────────────────────────────────────────────
-const targetPool = [];
-const TARGET_POOL_SIZE = 20;
-
-// Target geometry — flat disc, orientation IS the instruction
-const targetGeo = new THREE.CircleGeometry(CONFIG.TARGET_RADIUS, 24);
-const targetRingGeo = new THREE.RingGeometry(
-  CONFIG.TARGET_RADIUS * 0.85, CONFIG.TARGET_RADIUS, 24
-);
-
-// Shared materials (left=blue, right=red)
-function makeTargetMat(color) {
-  return new THREE.MeshStandardMaterial({
-    color, emissive: color, emissiveIntensity: 0.5,
-    transparent: true, opacity: 0.9, side: THREE.DoubleSide,
-  });
-}
-function makeTargetRingMat(color) {
-  return new THREE.MeshBasicMaterial({
-    color: 0xffffff, transparent: true, opacity: 0.4,
-    side: THREE.DoubleSide,
-  });
-}
-const targetMats = {
-  left:  { disc: makeTargetMat(CONFIG.LEFT_COLOR),  ring: makeTargetRingMat(CONFIG.LEFT_COLOR) },
-  right: { disc: makeTargetMat(CONFIG.RIGHT_COLOR), ring: makeTargetRingMat(CONFIG.RIGHT_COLOR) },
-};
-
-function createTarget() {
-  const group = new THREE.Group();
-
-  // Solid disc — colored face is the "hit here" surface
-  const disc = new THREE.Mesh(targetGeo, targetMats.left.disc);
-  group.add(disc);
-  group.userData.disc = disc;
-
-  // Thin ring border for visibility
-  const ring = new THREE.Mesh(targetRingGeo, targetMats.left.ring);
-  group.add(ring);
-  group.userData.ring = ring;
-
-  group.visible = false;
-  scene.add(group);
-  return group;
-}
-
-// Pre-populate pool
-for (let i = 0; i < TARGET_POOL_SIZE; i++) {
-  targetPool.push(createTarget());
-}
-
-function getTarget() {
-  for (const t of targetPool) {
-    if (!t.visible) return t;
+  // ── Beat timing ──
+  beatIntervalMs() {
+    return (60 / this.config.BPM) * this.config.BEATS_PER_SPAWN * 1000;
   }
-  const t = createTarget();
-  targetPool.push(t);
-  return t;
-}
-
-// Spawn patterns — each target has a punch type with expected direction
-const SPAWN_PATTERNS = [
-  { positions: [{ x: -0.5, y: 1.3, hand: 0, punch: 'jab' }],      name: 'left_jab' },
-  { positions: [{ x: 0.5, y: 1.3, hand: 1, punch: 'cross' }],     name: 'right_cross' },
-  { positions: [{ x: -0.5, y: 1.3, hand: 0, punch: 'hook_l' }],   name: 'left_hook' },
-  { positions: [{ x: 0.5, y: 1.3, hand: 1, punch: 'hook_r' }],    name: 'right_hook' },
-  { positions: [{ x: -0.5, y: 1.3, hand: 0, punch: 'uppercut' }], name: 'left_upper' },
-  { positions: [{ x: 0.5, y: 1.3, hand: 1, punch: 'uppercut' }],  name: 'right_upper' },
-];
-
-function spawnTarget() {
-  const pattern = SPAWN_PATTERNS[Math.floor(Math.random() * SPAWN_PATTERNS.length)];
-
-  for (const pos of pattern.positions) {
-    const target = getTarget();
-    const variant = pos.hand === 0 ? 'left' : 'right';
-    target.userData.disc.material = targetMats[variant].disc;
-    target.userData.ring.material = targetMats[variant].ring;
-    target.userData.hand = pos.hand;
-    target.userData.hit = false;
-    target.userData.tracking = null;
-    target.userData.spawnTime = performance.now();
-
-    // Punch type and expected direction
-    const punchType = PUNCH_TYPES[pos.punch || 'jab'];
-    target.userData.punchType = pos.punch || 'jab';
-    target.userData.expectedDir = punchType.dir.clone();
-
-    // Orient disc so its face normal = expected punch direction
-    // Player sees the face → "punch INTO this surface"
-    const dir = punchType.dir;
-    target.quaternion.setFromUnitVectors(
-      new THREE.Vector3(0, 0, 1),  // CircleGeometry default normal
-      dir.clone().negate()          // face toward incoming punch
-    );
-
-    // Position: fixed from pattern
-    target.position.set(pos.x, pos.y, -CONFIG.SPAWN_DISTANCE);
-
-    target.visible = true;
-    target.scale.setScalar(0.01);
-    state.targets.push(target);
-  }
-}
-
-// ─────────────────────────────────────────────
-// SCORING & FEEDBACK
-// ─────────────────────────────────────────────
-// Evaluate hit — combines distance accuracy + angle accuracy
-function evaluateHit(distance, punchVelocity, expectedDir) {
-  // Distance grade
-  let distLabel, distScore;
-  if (distance < CONFIG.PERFECT_THRESHOLD) {
-    distLabel = 'PERFECT'; distScore = 100;
-  } else if (distance < CONFIG.GREAT_THRESHOLD) {
-    distLabel = 'GREAT'; distScore = 75;
-  } else if (distance < CONFIG.GOOD_THRESHOLD) {
-    distLabel = 'GOOD'; distScore = 50;
-  } else if (distance < CONFIG.HIT_DISTANCE) {
-    distLabel = 'WEAK'; distScore = 20;
-  } else {
-    return null;
+  travelDuration() {
+    // Time for target to travel from spawn to anchor Z
+    const anchorZ = (this.calibration.left.z + this.calibration.right.z) / 2;
+    return (this.config.SPAWN_DISTANCE + Math.abs(anchorZ)) / this.config.TARGET_SPEED;
   }
 
-  // Angle accuracy: dot product of punch direction vs expected
-  let angleAccuracy = 1.0;
-  if (expectedDir && punchVelocity.lengthSq() > 0.01) {
-    tmpVec.copy(punchVelocity).normalize();
-    angleAccuracy = Math.max(0, tmpVec.dot(expectedDir));
-  }
+  // ── Scoring ──
+  evaluateHit(distance, punchVel, expectedDir) {
+    const C = this.config;
+    let distLabel, distScore;
+    if (distance < C.PERFECT_THRESHOLD) { distLabel = 'PERFECT'; distScore = 100; }
+    else if (distance < C.GREAT_THRESHOLD) { distLabel = 'GREAT'; distScore = 75; }
+    else if (distance < C.GOOD_THRESHOLD) { distLabel = 'GOOD'; distScore = 50; }
+    else if (distance < C.HIT_DISTANCE) { distLabel = 'WEAK'; distScore = 20; }
+    else return null;
 
-  // Combined score — angle scales the distance score
-  const score = Math.round(distScore * (0.5 + 0.5 * angleAccuracy));
-  const breaksCombo = distLabel === 'WEAK' || angleAccuracy < 0.15;
-
-  // Label reflects worst dimension
-  const label = angleAccuracy < 0.15 ? 'WEAK' :
-                angleAccuracy < 0.4 ? (distLabel === 'PERFECT' ? 'GREAT' : distLabel) :
-                distLabel;
-  const color = label === 'PERFECT' ? CONFIG.PERFECT_COLOR :
-                label === 'GREAT'   ? CONFIG.GREAT_COLOR :
-                label === 'GOOD'    ? CONFIG.GOOD_COLOR : 0x886644;
-
-  return { label, score, color, angleAccuracy, breaksCombo };
-}
-
-function showFeedback(position, label, color) {
-  // Create floating text sprite
-  const canvas = document.createElement('canvas');
-  canvas.width = 256;
-  canvas.height = 128;
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, 256, 128);
-  ctx.font = 'bold 48px Segoe UI, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#' + color.toString(16).padStart(6, '0');
-  ctx.fillText(label, 128, 72);
-
-  const texture = new THREE.CanvasTexture(canvas);
-  const mat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
-  const sprite = new THREE.Sprite(mat);
-  sprite.position.copy(position);
-  sprite.scale.set(0.8, 0.4, 1);
-  sprite.userData.life = 1.0;
-  scene.add(sprite);
-  state.feedbacks.push(sprite);
-}
-
-function onHit(target, controllerIndex, distance, hitPos) {
-  const punchVel = state.controllerVelocities[controllerIndex];
-  const expectedDir = target.userData.expectedDir || null;
-  const result = evaluateHit(distance, punchVel, expectedDir);
-  if (!result) return;
-
-  // target.visible and .hit already set by collision code
-  // WEAK hits break combo, other hits build it
-  if (result.breaksCombo) {
-    state.combo = 0;
-  } else {
-    state.combo++;
-  }
-  if (state.combo > state.maxCombo) state.maxCombo = state.combo;
-
-  const comboMultiplier = 1 + Math.floor(state.combo / 10) * 0.5;
-  const points = Math.round(result.score * comboMultiplier);
-  state.score += points;
-  state.totalPunches++;
-  state.hits[result.label.toLowerCase()]++;
-
-  // Haptic feedback — use the stored inputSource for correct hand mapping
-  const inputSource = controllers[controllerIndex]?.userData?.inputSource;
-  if (inputSource && inputSource.gamepad) {
-    const gp = inputSource.gamepad;
-    if (gp.hapticActuators && gp.hapticActuators.length > 0) {
-      gp.hapticActuators[0].pulse(0.8, 100);
-    }
-  }
-
-  // Line from anchor to controller position at closest approach
-  const handColor = controllerIndex === 0 ? CONFIG.LEFT_COLOR : CONFIG.RIGHT_COLOR;
-  const anchor = controllerIndex === 0 ? calibration.left : calibration.right;
-  createImpactMark(hitPos, anchor, handColor, result.label);
-
-  // Show feedback text
-  const feedbackPos = target.position.clone();
-  feedbackPos.y += 0.3;
-  const angleTag = result.angleAccuracy < 0.4 ? ' ✕' : '';
-  showFeedback(feedbackPos, `${result.label} +${points}${angleTag}`, result.color);
-
-  // Glove pulse
-  const glove = glovesMeshes[controllerIndex];
-  if (glove) {
-    glove.scale.setScalar(1.5);
-  }
-}
-
-function onMiss(target) {
-  state.combo = 0;
-  state.hits.miss++;
-
-  showFeedback(target.position.clone(), 'MISS', CONFIG.MISS_COLOR);
-  target.visible = false;
-}
-
-// ─────────────────────────────────────────────
-// INK IMPACT — thin line at hit position
-// ─────────────────────────────────────────────
-
-// Line from anchor to hit position — just connect two points
-function createImpactMark(hitPos, anchorPos, color, hitQuality) {
-  while (state.inkResidues.length >= CONFIG.MAX_RESIDUE_MARKS) {
-    const oldest = state.inkResidues.shift();
-    scene.remove(oldest);
-    oldest.material.dispose();
-  }
-
-  const qualityOpacity = hitQuality === 'PERFECT' ? 0.95 :
-                         hitQuality === 'GREAT'   ? 0.75 :
-                         hitQuality === 'GOOD'    ? 0.5  : 0.25;
-
-  const geo = new THREE.BufferGeometry().setFromPoints([
-    anchorPos.clone(),
-    hitPos.clone(),
-  ]);
-  const mat = new THREE.LineBasicMaterial({
-    color, transparent: true, opacity: qualityOpacity,
-  });
-  const line = new THREE.Line(geo, mat);
-
-  line.userData = {
-    spawnTime: performance.now(),
-    lifetime: CONFIG.INK_RESIDUE_LIFETIME * 1000,
-    fadeTime: CONFIG.INK_RESIDUE_FADE_TIME * 1000,
-    hitQuality: hitQuality,
-    baseOpacity: qualityOpacity,
-  };
-
-  scene.add(line);
-  state.inkResidues.push(line);
-}
-
-// Fade residue marks over time
-function updateInkSystem(delta) {
-  const now = performance.now();
-
-  for (let i = state.inkResidues.length - 1; i >= 0; i--) {
-    const r = state.inkResidues[i];
-    const age = now - r.userData.spawnTime;
-    const remaining = r.userData.lifetime - age;
-
-    if (remaining <= 0) {
-      scene.remove(r);
-      r.geometry.dispose();
-      r.material.dispose();
-      state.inkResidues.splice(i, 1);
-    } else if (remaining < r.userData.fadeTime) {
-      r.material.opacity = r.userData.baseOpacity * (remaining / r.userData.fadeTime);
-    }
-  }
-}
-const anchorRingGeo = new THREE.RingGeometry(0.9, 1.0, 24);
-const anchorMatLeft = new THREE.MeshBasicMaterial({
-  color: CONFIG.LEFT_COLOR, transparent: true, opacity: 0.4,
-  depthWrite: false, side: THREE.DoubleSide,
-});
-const anchorMatRight = new THREE.MeshBasicMaterial({
-  color: CONFIG.RIGHT_COLOR, transparent: true, opacity: 0.4,
-  depthWrite: false, side: THREE.DoubleSide,
-});
-
-const anchors = [null, null]; // [left, right]
-function createAnchors() {
-  for (let i = 0; i < 2; i++) {
-    const mat = i === 0 ? anchorMatLeft : anchorMatRight;
-    const anchor = new THREE.Mesh(anchorRingGeo, mat);
-    const pos = i === 0 ? calibration.left : calibration.right;
-    anchor.position.copy(pos);
-    anchor.lookAt(pos.x, pos.y, pos.z + 1);
-    anchor.scale.setScalar(CONFIG.ANCHOR_SIZE);
-    scene.add(anchor);
-    anchors[i] = anchor;
-  }
-}
-createAnchors();
-
-function updateAnchorPositions() {
-  for (let i = 0; i < 2; i++) {
-    const pos = i === 0 ? calibration.left : calibration.right;
-    anchors[i].position.copy(pos);
-    anchors[i].lookAt(pos.x, pos.y, pos.z + 1);
-  }
-}
-
-
-// ─────────────────────────────────────────────
-// HUD (in-VR using sprites)
-// ─────────────────────────────────────────────
-let hudSprite;
-const hudCanvas = document.createElement('canvas');
-hudCanvas.width = 512;
-hudCanvas.height = 256;
-const hudCtx = hudCanvas.getContext('2d');
-const hudTexture = new THREE.CanvasTexture(hudCanvas);
-
-function createHUD() {
-  const mat = new THREE.SpriteMaterial({ map: hudTexture, transparent: true, depthTest: false });
-  hudSprite = new THREE.Sprite(mat);
-  hudSprite.scale.set(1.5, 0.75, 1);
-  // Will be positioned relative to camera each frame
-  scene.add(hudSprite);
-}
-createHUD();
-
-// HUD dirty-flag state — avoid redrawing every frame
-const hudPrev = { score: -1, combo: -1, seconds: -1, perfect: -1, great: -1, good: -1, weak: -1, miss: -1 };
-
-function updateHUD() {
-  const elapsed = state.sessionStart > 0 ? (performance.now() - state.sessionStart) / 1000 : 0;
-  const curSeconds = Math.floor(elapsed);
-
-  // Only redraw when values actually change
-  if (hudPrev.score === state.score && hudPrev.combo === state.combo &&
-      hudPrev.seconds === curSeconds && hudPrev.miss === state.hits.miss) return;
-
-  hudPrev.score = state.score;
-  hudPrev.combo = state.combo;
-  hudPrev.seconds = curSeconds;
-  hudPrev.perfect = state.hits.perfect;
-  hudPrev.great = state.hits.great;
-  hudPrev.good = state.hits.good;
-  hudPrev.weak = state.hits.weak;
-  hudPrev.miss = state.hits.miss;
-
-  const ctx = hudCtx;
-  ctx.clearRect(0, 0, 512, 256);
-
-  // Background
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-  ctx.roundRect(10, 10, 492, 236, 15);
-  ctx.fill();
-
-  // Score
-  ctx.font = 'bold 42px Segoe UI, sans-serif';
-  ctx.fillStyle = '#ff6b35';
-  ctx.textAlign = 'left';
-  ctx.fillText(state.score.toLocaleString(), 30, 65);
-
-  // Combo
-  if (state.combo > 1) {
-    ctx.font = 'bold 28px Segoe UI, sans-serif';
-    ctx.fillStyle = '#ffd700';
-    ctx.fillText(`${state.combo}x COMBO`, 30, 105);
-  }
-
-  // Stats
-  ctx.font = '18px Segoe UI, sans-serif';
-  ctx.fillStyle = '#aaa';
-  const minutes = Math.floor(curSeconds / 60);
-  const secs = curSeconds % 60;
-  ctx.fillText(`Time: ${minutes}:${secs.toString().padStart(2, '0')}`, 30, 145);
-
-  // Calories (MET formula: kcal/min = MET * weight * 3.5 / 200)
-  state.calories = (CONFIG.MET_VALUE * CONFIG.USER_WEIGHT_KG * 3.5 / 200) * (curSeconds / 60);
-  ctx.fillText(`Cal: ${Math.round(state.calories)} kcal`, 30, 175);
-
-  // Accuracy
-  const totalHits = state.hits.perfect + state.hits.great + state.hits.good + state.hits.weak;
-  const totalAttempts = totalHits + state.hits.miss;
-  const accuracy = totalAttempts > 0 ? Math.round((totalHits / totalAttempts) * 100) : 100;
-  ctx.fillText(`Accuracy: ${accuracy}%`, 30, 205);
-
-  // Right side — hit breakdown
-  ctx.textAlign = 'right';
-  ctx.font = '16px Segoe UI, sans-serif';
-  ctx.fillStyle = '#ffd700'; ctx.fillText(`Perfect: ${state.hits.perfect}`, 480, 145);
-  ctx.fillStyle = '#00ff88'; ctx.fillText(`Great: ${state.hits.great}`, 480, 170);
-  ctx.fillStyle = '#44aaff'; ctx.fillText(`Good: ${state.hits.good}`, 480, 195);
-  ctx.fillStyle = '#886644'; ctx.fillText(`Weak: ${state.hits.weak}`, 480, 220);
-  ctx.fillStyle = '#ff2222'; ctx.fillText(`Miss: ${state.hits.miss}`, 480, 245);
-
-  hudTexture.needsUpdate = true;
-}
-
-// ─────────────────────────────────────────────
-// BEAT / RHYTHM ENGINE
-// ─────────────────────────────────────────────
-const beatInterval = () => (60 / CONFIG.BPM) * CONFIG.BEATS_PER_SPAWN * 1000; // ms
-
-// AudioContext for beat sync (created on user gesture)
-let audioCtx = null;
-let beatOsc = null;
-
-function initAudio() {
-  if (audioCtx) return;
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-}
-
-function playBeatTick() {
-  if (!audioCtx) return;
-  const osc = audioCtx.createOscillator();
-  const gain = audioCtx.createGain();
-  osc.type = 'sine';
-  osc.frequency.value = 880;
-  gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
-  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.05);
-  osc.connect(gain);
-  gain.connect(audioCtx.destination);
-  osc.start();
-  osc.stop(audioCtx.currentTime + 0.05);
-}
-
-function playHitSound() {
-  if (!audioCtx) return;
-  const osc = audioCtx.createOscillator();
-  const gain = audioCtx.createGain();
-  osc.type = 'square';
-  osc.frequency.value = 220;
-  gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
-  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.1);
-  osc.connect(gain);
-  gain.connect(audioCtx.destination);
-  osc.start();
-  osc.stop(audioCtx.currentTime + 0.1);
-}
-
-// ─────────────────────────────────────────────
-// GAME LOOP
-// ─────────────────────────────────────────────
-const clock = new THREE.Clock();
-const tmpVec = new THREE.Vector3();
-const tmpVec2 = new THREE.Vector3();
-const cameraWorldPos = new THREE.Vector3();
-const ctrlWorldPos = [new THREE.Vector3(), new THREE.Vector3()];
-const hudOffset = new THREE.Vector3(0, 1.2, 0);
-
-// ─────────────────────────────────────────────
-// CALIBRATION — extend arms forward, hold steady to set anchor positions
-// ─────────────────────────────────────────────
-let calibHUD = null;
-const calibCanvas = document.createElement('canvas');
-calibCanvas.width = 512; calibCanvas.height = 128;
-const calibCtx = calibCanvas.getContext('2d');
-const calibTexture = new THREE.CanvasTexture(calibCanvas);
-
-function createCalibHUD() {
-  const mat = new THREE.SpriteMaterial({ map: calibTexture, transparent: true, depthTest: false });
-  calibHUD = new THREE.Sprite(mat);
-  calibHUD.scale.set(1.5, 0.4, 1);
-  calibHUD.visible = false;
-  scene.add(calibHUD);
-}
-createCalibHUD();
-
-function updateCalibHUD(progress, text) {
-  const ctx = calibCtx;
-  ctx.clearRect(0, 0, 512, 128);
-  ctx.fillStyle = 'rgba(0,0,0,0.6)';
-  ctx.roundRect(10, 10, 492, 108, 12);
-  ctx.fill();
-
-  // Progress bar
-  ctx.fillStyle = 'rgba(255,255,255,0.15)';
-  ctx.fillRect(30, 85, 452, 16);
-  ctx.fillStyle = progress >= 1 ? '#00ff88' : '#ff6b35';
-  ctx.fillRect(30, 85, 452 * Math.min(progress, 1), 16);
-
-  // Text
-  ctx.font = 'bold 28px Segoe UI, sans-serif';
-  ctx.fillStyle = '#fff';
-  ctx.textAlign = 'center';
-  ctx.fillText(text, 256, 60);
-  calibTexture.needsUpdate = true;
-}
-
-function calibrationLoop(delta) {
-  const now = performance.now();
-
-  // Get controller world positions
-  for (let i = 0; i < 2; i++) {
-    controllers[i].getWorldPosition(ctrlWorldPos[i]);
-  }
-
-  // Anchors follow controllers in real-time during calibration
-  calibration.left.copy(ctrlWorldPos[0]);
-  calibration.right.copy(ctrlWorldPos[1]);
-  updateAnchorPositions();
-
-  // Check velocity — are both hands steady?
-  let bothSteady = true;
-  for (let i = 0; i < 2; i++) {
-    const speed = state.controllerVelocities[i].length();
-    if (speed > CONFIG.CALIBRATION_VELOCITY_THRESHOLD) {
-      calibration.steadyStart[i] = now;
-      bothSteady = false;
-    }
-  }
-
-  // Calculate hold progress
-  const minSteady = Math.min(
-    now - calibration.steadyStart[0],
-    now - calibration.steadyStart[1]
-  );
-  const holdProgress = minSteady / (CONFIG.CALIBRATION_HOLD_TIME * 1000);
-
-  // Position calibration HUD in front of camera
-  camera.getWorldPosition(cameraWorldPos);
-  tmpVec.set(0, 0, -1).applyQuaternion(camera.quaternion);
-  calibHUD.position.copy(cameraWorldPos).add(tmpVec.multiplyScalar(2.0)).add(hudOffset);
-  calibHUD.quaternion.copy(camera.quaternion);
-  calibHUD.visible = true;
-
-  if (holdProgress >= 1 && bothSteady) {
-    // Calibration complete — lock positions
-    calibration.done = true;
-    state.isCalibrating = false;
-    calibHUD.visible = false;
-
-    // Start game
-    state.isPlaying = true;
-    state.sessionStart = performance.now();
-    state.lastBeatTime = performance.now();
-
-    // Update all spawn patterns with calibrated positions
-    for (const pat of SPAWN_PATTERNS) {
-      for (const pos of pat.positions) {
-        const cal = pos.hand === 0 ? calibration.left : calibration.right;
-        pos.x = cal.x;
-        pos.y = cal.y;
+    let angleAccuracy = 1.0;
+    if (expectedDir) {
+      const vLen = Math.sqrt(punchVel[0]**2 + punchVel[1]**2 + punchVel[2]**2);
+      if (vLen > 0.1) {
+        const nx = punchVel[0]/vLen, ny = punchVel[1]/vLen, nz = punchVel[2]/vLen;
+        angleAccuracy = Math.max(0, nx*expectedDir[0] + ny*expectedDir[1] + nz*expectedDir[2]);
       }
     }
 
-    updateAnchorPositions();
-    return;
+    const score = Math.round(distScore * (0.5 + 0.5 * angleAccuracy));
+    const breaksCombo = distLabel === 'WEAK' || angleAccuracy < 0.15;
+    const label = angleAccuracy < 0.15 ? 'WEAK' :
+                  angleAccuracy < 0.4 ? (distLabel === 'PERFECT' ? 'GREAT' : distLabel) :
+                  distLabel;
+    const color = label === 'PERFECT' ? C.PERFECT_COLOR :
+                  label === 'GREAT' ? C.GREAT_COLOR :
+                  label === 'GOOD' ? C.GOOD_COLOR : 0x886644;
+
+    return { label, score, color, angleAccuracy, breaksCombo };
   }
 
-  updateCalibHUD(holdProgress, bothSteady ? 'Hold steady...' : 'Extend arms forward');
-
-  // Update controller velocities during calibration (reuse gameLoop logic)
-  for (let i = 0; i < 2; i++) {
-    if (state.controllerPrevPosInit[i]) {
-      state.controllerVelocities[i].subVectors(ctrlWorldPos[i], state.controllerPrevPos[i]).divideScalar(delta);
-    }
-    state.controllerPrevPos[i].copy(ctrlWorldPos[i]);
-    state.controllerPrevPosInit[i] = true;
-  }
-}
-
-function gameLoop(timestamp, frame) {
-  const delta = clock.getDelta();
-
-  // Calibration phase runs before gameplay
-  if (state.isCalibrating) {
-    calibrationLoop(delta);
-    return;
+  // ── Calibration ──
+  startCalibration() {
+    this.state.phase = 'calibrating';
+    const now = performance.now();
+    this.calibration.steadyStart[0] = now;
+    this.calibration.steadyStart[1] = now;
   }
 
-  if (!state.isPlaying) return;
+  updateCalibration(delta) {
+    const now = performance.now();
+    const C = this.config;
 
-  const now = performance.now();
+    // Anchors follow controllers
+    this.calibration.left.x = this.controllers[0].pos[0];
+    this.calibration.left.y = this.controllers[0].pos[1];
+    this.calibration.left.z = this.controllers[0].pos[2];
+    this.calibration.right.x = this.controllers[1].pos[0];
+    this.calibration.right.y = this.controllers[1].pos[1];
+    this.calibration.right.z = this.controllers[1].pos[2];
 
-  // ── Beat-based spawning ──
-  if (now - state.lastBeatTime > beatInterval()) {
-    state.lastBeatTime = now;
-    state.beatIndex++;
-    spawnTarget();
-    playBeatTick();
+    // Check velocity
+    let bothSteady = true;
+    for (let i = 0; i < 2; i++) {
+      const v = this.controllers[i].vel;
+      const speed = Math.sqrt(v[0]**2 + v[1]**2 + v[2]**2);
+      if (speed > C.CALIBRATION_VELOCITY_THRESHOLD) {
+        this.calibration.steadyStart[i] = now;
+        bothSteady = false;
+      }
+    }
+
+    const minSteady = Math.min(
+      now - this.calibration.steadyStart[0],
+      now - this.calibration.steadyStart[1]
+    );
+    const progress = minSteady / (C.CALIBRATION_HOLD_TIME * 1000);
+
+    this.emit('calibrationProgress', { progress, steady: bothSteady });
+
+    if (progress >= 1 && bothSteady) {
+      this.calibration.done = true;
+      // Update patterns
+      for (const pat of this.patterns) {
+        for (const pos of pat.positions) {
+          const cal = pos.hand === 0 ? this.calibration.left : this.calibration.right;
+          pos.x = cal.x;
+          pos.y = cal.y;
+        }
+      }
+      this.emit('calibrationDone', this.calibration);
+      this.startPlaying();
+    }
   }
 
-  // ── Update controller velocities ──
-  for (let i = 0; i < controllers.length; i++) {
-    const ctrl = controllers[i];
-    const worldPos = ctrlWorldPos[i];
-    ctrl.getWorldPosition(worldPos);
-
-    if (state.controllerPrevPosInit[i]) {
-      state.controllerVelocities[i].subVectors(worldPos, state.controllerPrevPos[i]).divideScalar(delta);
-    }
-    state.controllerPrevPos[i].copy(worldPos);
-    state.controllerPrevPosInit[i] = true;
-
-    // Update trail
-    const trail = ctrl.userData.trail;
-    if (trail) {
-      const posAttr = trail.geometry.getAttribute('position');
-      const idx = (ctrl.userData.trailIndex % 30) * 3;
-      posAttr.array[idx] = worldPos.x;
-      posAttr.array[idx + 1] = worldPos.y;
-      posAttr.array[idx + 2] = worldPos.z;
-      posAttr.needsUpdate = true;
-      ctrl.userData.trailIndex++;
-    }
-
-    // Glove pulse decay
-    const glove = glovesMeshes[i];
-    if (glove && glove.scale.x > 1.0) {
-      glove.scale.multiplyScalar(0.9);
-      if (glove.scale.x < 1.01) glove.scale.setScalar(1.0);
-    }
-
+  startPlaying() {
+    this.state.phase = 'playing';
+    this.state.sessionStart = performance.now();
+    this.state.lastBeatTime = performance.now();
   }
 
-  // ── Update targets ──
-  for (let i = state.targets.length - 1; i >= 0; i--) {
-    const target = state.targets[i];
-    if (target.userData.hit) {
-      state.targets.splice(i, 1);
-      continue;
+  // ── Spawn ──
+  spawnTarget() {
+    const pat = this.patterns[Math.floor(Math.random() * this.patterns.length)];
+    for (const pos of pat.positions) {
+      const punch = this.punchTypes[pos.punch || 'jab'];
+      const id = this.state.nextTargetId++;
+      this.targets.push({
+        id,
+        x: pos.x, y: pos.y, z: -this.config.SPAWN_DISTANCE,
+        hand: pos.hand,
+        punchType: pos.punch || 'jab',
+        expectedDir: punch.dir.slice(),
+        hit: false,
+        tracking: null,
+        spawnTime: performance.now(),
+      });
+      this.emit('targetSpawned', this.targets[this.targets.length - 1]);
+    }
+  }
+
+  // ── Main update ──
+  update(delta) {
+    if (this.state.phase === 'calibrating') {
+      this.updateControllerVelocities(delta);
+      this.updateCalibration(delta);
+      return;
+    }
+    if (this.state.phase !== 'playing') return;
+
+    const now = performance.now();
+    const C = this.config;
+
+    // Beat spawning
+    if (this.state.metronome) {
+      // Metronome mode: schedule spawn so target arrives at anchor on beat
+      const beatMs = this.beatIntervalMs();
+      const nextBeatTime = this.state.lastBeatTime + beatMs;
+      const spawnLeadTime = this.travelDuration() * 1000;
+      if (now >= nextBeatTime - spawnLeadTime && now - this.state.lastBeatTime >= beatMs * 0.5) {
+        this.state.lastBeatTime = nextBeatTime;
+        this.state.beatIndex++;
+        this.spawnTarget();
+        this.emit('beat', this.state.beatIndex);
+      }
+    } else {
+      // Free mode: spawn on beat tick
+      if (now - this.state.lastBeatTime > this.beatIntervalMs()) {
+        this.state.lastBeatTime = now;
+        this.state.beatIndex++;
+        this.spawnTarget();
+        this.emit('beat', this.state.beatIndex);
+      }
     }
 
-    // Move toward player
-    target.position.z += CONFIG.TARGET_SPEED * delta;
+    this.updateControllerVelocities(delta);
 
-    // Scale-in animation
-    if (target.scale.x < 1) {
-      target.scale.addScalar(delta * 5);
-      if (target.scale.x > 1) target.scale.setScalar(1);
+    // Update targets
+    for (let i = this.targets.length - 1; i >= 0; i--) {
+      const t = this.targets[i];
+      if (t.hit) { this.targets.splice(i, 1); continue; }
+
+      // Move toward player
+      t.z += C.TARGET_SPEED * delta;
+
+      // Scale-in (renderer reads this)
+      if (!t.scaleReady && t.z > -C.SPAWN_DISTANCE + 1) t.scaleReady = true;
+
+      // Skip collision if far
+      if (t.z < -C.HIT_DISTANCE * 2) continue;
+
+      // Closest-approach collision
+      this.processCollision(t, i);
+
+      // Miss check
+      if (!t.hit && t.z > C.MISS_DISTANCE) {
+        this.onMiss(t, i);
+      }
     }
 
-    // ── Closest-approach hit detection ──
-    // Track minimum distance while controller is in range.
-    // Score when controller starts moving away (distance increasing).
-    if (target.position.z < -CONFIG.HIT_DISTANCE * 2) continue;
+    // Calories
+    const elapsed = (now - this.state.sessionStart) / 1000;
+    this.state.calories = (C.MET_VALUE * C.USER_WEIGHT_KG * 3.5 / 200) * (elapsed / 60);
+  }
 
-    for (let c = 0; c < controllers.length; c++) {
-      if (target.userData.hand !== -1 && target.userData.hand !== c) continue;
+  updateControllerVelocities(delta) {
+    if (delta <= 0) return;
+    for (let i = 0; i < 2; i++) {
+      const c = this.controllers[i];
+      if (c.inited) {
+        c.vel[0] = (c.pos[0] - c.prevPos[0]) / delta;
+        c.vel[1] = (c.pos[1] - c.prevPos[1]) / delta;
+        c.vel[2] = (c.pos[2] - c.prevPos[2]) / delta;
+      }
+      c.prevPos[0] = c.pos[0];
+      c.prevPos[1] = c.pos[1];
+      c.prevPos[2] = c.pos[2];
+      c.inited = true;
+    }
+  }
 
-      const dist = ctrlWorldPos[c].distanceTo(target.position);
-      const speed = state.controllerVelocities[c].length();
-      const tracking = target.userData.tracking;
+  processCollision(t, idx) {
+    const C = this.config;
+    for (let c = 0; c < 2; c++) {
+      if (t.hand !== -1 && t.hand !== c) continue;
 
-      if (dist < CONFIG.HIT_DISTANCE && speed > CONFIG.MIN_PUNCH_VELOCITY) {
-        if (!tracking) {
-          // Enter hit zone — start tracking closest approach
-          target.userData.tracking = {
+      const ctrl = this.controllers[c];
+      const dx = ctrl.pos[0] - t.x, dy = ctrl.pos[1] - t.y, dz = ctrl.pos[2] - t.z;
+      const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      const speed = Math.sqrt(ctrl.vel[0]**2 + ctrl.vel[1]**2 + ctrl.vel[2]**2);
+
+      if (dist < C.HIT_DISTANCE && speed > C.MIN_PUNCH_VELOCITY) {
+        if (!t.tracking) {
+          t.tracking = {
             controller: c, minDist: dist, frames: 0,
-            hitPos: ctrlWorldPos[c].clone(),
+            hitPos: ctrl.pos.slice(),
           };
-        } else if (tracking.controller === c) {
-          // Still in zone — update minimum distance
-          if (dist < tracking.minDist) {
-            tracking.minDist = dist;
-            tracking.hitPos.copy(ctrlWorldPos[c]);
-            tracking.frames = 0;
+        } else if (t.tracking.controller === c) {
+          if (dist < t.tracking.minDist) {
+            t.tracking.minDist = dist;
+            t.tracking.hitPos = ctrl.pos.slice();
+            t.tracking.frames = 0;
           } else {
-            tracking.frames++;
+            t.tracking.frames++;
           }
-          // Distance increasing for 2+ frames → fist passed closest point, finalize
-          if (tracking.frames >= 2) {
-            target.userData.hit = true;
-            target.visible = false;
-            onHit(target, c, tracking.minDist, tracking.hitPos);
-            playHitSound();
-            state.targets.splice(i, 1);
-            break;
+          if (t.tracking.frames >= 2) {
+            this.onHit(t, idx, c, t.tracking.minDist, t.tracking.hitPos);
+            return;
           }
         }
-      } else if (tracking && tracking.controller === c) {
-        // Exited hit zone — finalize with best distance achieved
-        target.userData.hit = true;
-        target.visible = false;
-        onHit(target, c, tracking.minDist, tracking.hitPos);
-        playHitSound();
-        state.targets.splice(i, 1);
-        break;
+      } else if (t.tracking && t.tracking.controller === c) {
+        this.onHit(t, idx, c, t.tracking.minDist, t.tracking.hitPos);
+        return;
       }
     }
-    if (target.userData.hit) continue;
-
-    // Check if passed player (miss)
-    if (target.position.z > CONFIG.MISS_DISTANCE) {
-      onMiss(target);
-      state.targets.splice(i, 1);
-      continue;
-    }
   }
 
-  // ── Update ink residue marks (fade over time) ──
-  updateInkSystem(delta);
+  onHit(t, idx, controllerIndex, distance, hitPos) {
+    const result = this.evaluateHit(distance, this.controllers[controllerIndex].vel, t.expectedDir);
+    if (!result) return;
 
-  // ── Update feedback sprites ──
-  for (let i = state.feedbacks.length - 1; i >= 0; i--) {
-    const fb = state.feedbacks[i];
-    fb.userData.life -= delta * 1.5;
-    if (fb.userData.life <= 0) {
-      scene.remove(fb);
-      fb.material.dispose();
-      fb.material.map.dispose();
-      state.feedbacks.splice(i, 1);
-      continue;
-    }
-    fb.position.y += delta * 0.5;
-    fb.material.opacity = fb.userData.life;
+    t.hit = true;
+    this.targets.splice(idx, 1);
+
+    if (result.breaksCombo) { this.state.combo = 0; }
+    else { this.state.combo++; }
+    if (this.state.combo > this.state.maxCombo) this.state.maxCombo = this.state.combo;
+
+    const comboMult = 1 + Math.floor(this.state.combo / 10) * 0.5;
+    const points = Math.round(result.score * comboMult);
+    this.state.score += points;
+    this.state.totalPunches++;
+    this.state.hits[result.label.toLowerCase()]++;
+
+    const anchor = controllerIndex === 0 ? this.calibration.left : this.calibration.right;
+    const handColor = controllerIndex === 0 ? this.config.LEFT_COLOR : this.config.RIGHT_COLOR;
+
+    this.hitLog.push({
+      hitPos: hitPos.slice(),
+      anchorPos: [anchor.x, anchor.y, anchor.z],
+      color: handColor,
+      label: result.label,
+      time: performance.now(),
+    });
+
+    this.emit('hit', {
+      target: t, controllerIndex, distance, hitPos,
+      result, points, anchorPos: [anchor.x, anchor.y, anchor.z], handColor,
+    });
   }
 
-  // ── Position HUD relative to camera ──
-  camera.getWorldPosition(cameraWorldPos);
-  tmpVec.set(0, 0, -1).applyQuaternion(camera.quaternion);
-  hudSprite.position.copy(cameraWorldPos)
-    .add(tmpVec.multiplyScalar(2.5))
-    .add(hudOffset);
-  hudSprite.quaternion.copy(camera.quaternion);
-
-  // ── Update HUD ──
-  updateHUD();
-
-  // ── Animate arena lighting ──
-  const beatPhase = ((now % (60000 / CONFIG.BPM)) / (60000 / CONFIG.BPM));
-  const pulse = 0.5 + 0.5 * Math.pow(1 - beatPhase, 3);
-  spotLight.intensity = 1.5 + pulse;
+  onMiss(t, idx) {
+    t.hit = true;
+    this.targets.splice(idx, 1);
+    this.state.combo = 0;
+    this.state.hits.miss++;
+    this.emit('miss', { target: t });
+  }
 }
 
-// ─────────────────────────────────────────────
-// RENDER LOOP
-// ─────────────────────────────────────────────
-renderer.setAnimationLoop(function (timestamp, frame) {
-  gameLoop(timestamp, frame);
-  renderer.render(scene, camera);
+// ╔══════════════════════════════════════════════╗
+// ║  RENDERER — Three.js visuals, reads engine   ║
+// ╚══════════════════════════════════════════════╝
+class GameRenderer {
+  constructor(engine) {
+    this.engine = engine;
+    this.C = engine.config;
+
+    // Three.js setup
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    this.renderer.setPixelRatio(window.devicePixelRatio);
+    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.renderer.xr.enabled = true;
+    this.renderer.xr.cameraAutoUpdate = true;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.2;
+    document.body.appendChild(this.renderer.domElement);
+
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0x050510);
+    this.scene.fog = new THREE.Fog(0x050510, 8, 25);
+
+    this.camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
+    this.camera.position.set(0, 1.6, 0);
+
+    this.clock = new THREE.Clock();
+    this.tmpVec = new THREE.Vector3();
+    this.cameraWorldPos = new THREE.Vector3();
+    this.ctrlWorldPos = [new THREE.Vector3(), new THREE.Vector3()];
+
+    this.feedbacks = [];
+    this.inkLines = [];
+    this.targetMeshMap = new Map();
+
+    this._createLights();
+    this._createArena();
+    this._createControllers();
+    this._createTargetPool();
+    this._createAnchors();
+    this._createHUD();
+    this._createCalibHUD();
+    this._initAudio();
+    this._bindEvents();
+  }
+
+  // ── Lights ──
+  _createLights() {
+    this.scene.add(new THREE.AmbientLight(0x222244, 0.5));
+    const spot = new THREE.SpotLight(0xff6b35, 2, 20, Math.PI / 4, 0.5);
+    spot.position.set(0, 5, -2);
+    this.scene.add(spot);
+    this.spotLight = spot;
+    const p1 = new THREE.PointLight(0x4488ff, 1, 15);
+    p1.position.set(-3, 3, -5);
+    this.scene.add(p1);
+    const p2 = new THREE.PointLight(0xff4444, 1, 15);
+    p2.position.set(3, 3, -5);
+    this.scene.add(p2);
+  }
+
+  // ── Arena ──
+  _createArena() {
+    const C = this.C;
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(20, 20),
+      new THREE.MeshStandardMaterial({ color: 0x111122, roughness: 0.2, metalness: 0.8 })
+    );
+    floor.rotation.x = -Math.PI / 2;
+    this.scene.add(floor);
+
+    const grid = new THREE.GridHelper(20, 40, 0x222244, 0x111133);
+    grid.position.y = 0.01;
+    this.scene.add(grid);
+
+    for (let side = -1; side <= 1; side += 2) {
+      const mat = new THREE.MeshStandardMaterial({
+        color: side === -1 ? 0x4488ff : 0xff4444,
+        emissive: side === -1 ? 0x2244aa : 0xaa2222, emissiveIntensity: 0.5,
+      });
+      for (let z = -8; z <= -2; z += 3) {
+        const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 4, 8), mat);
+        pillar.position.set(side * 3, 2, z);
+        this.scene.add(pillar);
+      }
+    }
+
+    const stripMat = new THREE.MeshStandardMaterial({ color: 0xff6b35, emissive: 0xff6b35, emissiveIntensity: 0.3 });
+    for (let side = -1; side <= 1; side += 2) {
+      const strip = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.02, 12), stripMat);
+      strip.position.set(side * 1.5, 0.01, -4);
+      this.scene.add(strip);
+    }
+
+    const wallMat = new THREE.MeshStandardMaterial({
+      color: 0x0a0a18, roughness: 0.6, metalness: 0.2, transparent: true, opacity: 0.85,
+    });
+    const wall = new THREE.Mesh(new THREE.PlaneGeometry(8, 4), wallMat);
+    wall.position.set(0, 2, C.MISS_DISTANCE + 0.5);
+    this.scene.add(wall);
+    const border = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.PlaneGeometry(8, 4)),
+      new THREE.LineBasicMaterial({ color: 0x332244, transparent: true, opacity: 0.5 })
+    );
+    border.position.copy(wall.position);
+    this.scene.add(border);
+  }
+
+  // ── Controllers ──
+  _createControllers() {
+    const factory = new XRControllerModelFactory();
+    this.xrControllers = [];
+    this.gloves = [];
+    for (let i = 0; i < 2; i++) {
+      const ctrl = this.renderer.xr.getController(i);
+      this.scene.add(ctrl);
+      this.xrControllers.push(ctrl);
+
+      ctrl.addEventListener('connected', (e) => { ctrl.userData.inputSource = e.data; });
+      ctrl.addEventListener('disconnected', () => { ctrl.userData.inputSource = null; });
+
+      const grip = this.renderer.xr.getControllerGrip(i);
+      grip.add(factory.createControllerModel(grip));
+      this.scene.add(grip);
+
+      const color = i === 0 ? this.C.LEFT_COLOR : this.C.RIGHT_COLOR;
+      const glove = new THREE.Mesh(
+        new THREE.SphereGeometry(0.08, 16, 16),
+        new THREE.MeshStandardMaterial({
+          color, emissive: color, emissiveIntensity: 0.4, transparent: true, opacity: 0.7,
+        })
+      );
+      ctrl.add(glove);
+      this.gloves.push(glove);
+
+      // Trail
+      const trailGeo = new THREE.BufferGeometry();
+      trailGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(30 * 3), 3));
+      const trail = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.4 }));
+      trail.frustumCulled = false;
+      this.scene.add(trail);
+      ctrl.userData.trail = trail;
+      ctrl.userData.trailIndex = 0;
+    }
+  }
+
+  // ── Target pool ──
+  _createTargetPool() {
+    this.targetPool = [];
+    const C = this.C;
+    const discGeo = new THREE.CircleGeometry(C.TARGET_RADIUS, 24);
+    const ringGeo = new THREE.RingGeometry(C.TARGET_RADIUS * 0.85, C.TARGET_RADIUS, 24);
+    this._targetDiscGeo = discGeo;
+    this._targetRingGeo = ringGeo;
+
+    const makeDisc = (c) => new THREE.MeshStandardMaterial({
+      color: c, emissive: c, emissiveIntensity: 0.5, transparent: true, opacity: 0.9, side: THREE.DoubleSide,
+    });
+    const makeRing = () => new THREE.MeshBasicMaterial({
+      color: 0xffffff, transparent: true, opacity: 0.4, side: THREE.DoubleSide,
+    });
+    this._targetMats = {
+      left: { disc: makeDisc(C.LEFT_COLOR), ring: makeRing() },
+      right: { disc: makeDisc(C.RIGHT_COLOR), ring: makeRing() },
+    };
+
+    for (let i = 0; i < 20; i++) this.targetPool.push(this._makeTargetMesh());
+  }
+
+  _makeTargetMesh() {
+    const g = new THREE.Group();
+    const disc = new THREE.Mesh(this._targetDiscGeo, this._targetMats.left.disc);
+    g.add(disc); g.userData.disc = disc;
+    const ring = new THREE.Mesh(this._targetRingGeo, this._targetMats.left.ring);
+    g.add(ring); g.userData.ring = ring;
+    g.visible = false;
+    this.scene.add(g);
+    return g;
+  }
+
+  _getPooledTarget() {
+    for (const t of this.targetPool) { if (!t.visible) return t; }
+    const t = this._makeTargetMesh();
+    this.targetPool.push(t);
+    return t;
+  }
+
+  // ── Anchors ──
+  _createAnchors() {
+    const geo = new THREE.RingGeometry(0.9, 1.0, 24);
+    this.anchorMeshes = [];
+    for (let i = 0; i < 2; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: i === 0 ? this.C.LEFT_COLOR : this.C.RIGHT_COLOR,
+        transparent: true, opacity: 0.4, depthWrite: false, side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.scale.setScalar(this.C.ANCHOR_SIZE);
+      this.scene.add(mesh);
+      this.anchorMeshes.push(mesh);
+    }
+    this.updateAnchors();
+  }
+
+  updateAnchors() {
+    const cal = this.engine.calibration;
+    for (let i = 0; i < 2; i++) {
+      const p = i === 0 ? cal.left : cal.right;
+      this.anchorMeshes[i].position.set(p.x, p.y, p.z);
+      this.anchorMeshes[i].lookAt(p.x, p.y, p.z + 1);
+    }
+  }
+
+  // ── HUD ──
+  _createHUD() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512; canvas.height = 256;
+    this._hudCtx = canvas.getContext('2d');
+    this._hudTexture = new THREE.CanvasTexture(canvas);
+    const mat = new THREE.SpriteMaterial({ map: this._hudTexture, transparent: true, depthTest: false });
+    this._hudSprite = new THREE.Sprite(mat);
+    this._hudSprite.scale.set(1.5, 0.75, 1);
+    this.scene.add(this._hudSprite);
+    this._hudPrev = { score: -1, combo: -1, seconds: -1, miss: -1 };
+  }
+
+  updateHUD() {
+    const s = this.engine.state;
+    const elapsed = s.sessionStart > 0 ? (performance.now() - s.sessionStart) / 1000 : 0;
+    const curSec = Math.floor(elapsed);
+    if (this._hudPrev.score === s.score && this._hudPrev.combo === s.combo &&
+        this._hudPrev.seconds === curSec && this._hudPrev.miss === s.hits.miss) return;
+    Object.assign(this._hudPrev, { score: s.score, combo: s.combo, seconds: curSec, miss: s.hits.miss });
+
+    const ctx = this._hudCtx;
+    ctx.clearRect(0, 0, 512, 256);
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.roundRect(10, 10, 492, 236, 15); ctx.fill();
+
+    ctx.font = 'bold 42px Segoe UI, sans-serif'; ctx.fillStyle = '#ff6b35'; ctx.textAlign = 'left';
+    ctx.fillText(s.score.toLocaleString(), 30, 65);
+    if (s.combo > 1) { ctx.font = 'bold 28px Segoe UI, sans-serif'; ctx.fillStyle = '#ffd700'; ctx.fillText(`${s.combo}x COMBO`, 30, 105); }
+
+    ctx.font = '18px Segoe UI, sans-serif'; ctx.fillStyle = '#aaa';
+    ctx.fillText(`Time: ${Math.floor(curSec/60)}:${(curSec%60).toString().padStart(2,'0')}`, 30, 145);
+    ctx.fillText(`Cal: ${Math.round(s.calories)} kcal`, 30, 175);
+
+    const totalHits = s.hits.perfect + s.hits.great + s.hits.good + s.hits.weak;
+    const acc = (totalHits + s.hits.miss) > 0 ? Math.round(totalHits / (totalHits + s.hits.miss) * 100) : 100;
+    ctx.fillText(`Accuracy: ${acc}%`, 30, 205);
+
+    // Mode indicator
+    ctx.fillStyle = this.engine.state.metronome ? '#00ff88' : '#888';
+    ctx.fillText(this.engine.state.metronome ? 'METRONOME' : 'FREE', 30, 235);
+
+    ctx.textAlign = 'right'; ctx.font = '16px Segoe UI, sans-serif';
+    ctx.fillStyle = '#ffd700'; ctx.fillText(`Perfect: ${s.hits.perfect}`, 480, 145);
+    ctx.fillStyle = '#00ff88'; ctx.fillText(`Great: ${s.hits.great}`, 480, 170);
+    ctx.fillStyle = '#44aaff'; ctx.fillText(`Good: ${s.hits.good}`, 480, 195);
+    ctx.fillStyle = '#886644'; ctx.fillText(`Weak: ${s.hits.weak}`, 480, 220);
+    ctx.fillStyle = '#ff2222'; ctx.fillText(`Miss: ${s.hits.miss}`, 480, 245);
+
+    this._hudTexture.needsUpdate = true;
+  }
+
+  // ── Calibration HUD ──
+  _createCalibHUD() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512; canvas.height = 128;
+    this._calibCtx = canvas.getContext('2d');
+    this._calibTexture = new THREE.CanvasTexture(canvas);
+    const mat = new THREE.SpriteMaterial({ map: this._calibTexture, transparent: true, depthTest: false });
+    this._calibSprite = new THREE.Sprite(mat);
+    this._calibSprite.scale.set(1.5, 0.4, 1);
+    this._calibSprite.visible = false;
+    this.scene.add(this._calibSprite);
+  }
+
+  updateCalibHUD(progress, steady) {
+    const ctx = this._calibCtx;
+    ctx.clearRect(0, 0, 512, 128);
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.roundRect(10, 10, 492, 108, 12); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(30, 85, 452, 16);
+    ctx.fillStyle = progress >= 1 ? '#00ff88' : '#ff6b35';
+    ctx.fillRect(30, 85, 452 * Math.min(progress, 1), 16);
+    ctx.font = 'bold 28px Segoe UI, sans-serif'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+    ctx.fillText(steady ? 'Hold steady...' : 'Extend arms forward', 256, 60);
+    this._calibTexture.needsUpdate = true;
+
+    this.camera.getWorldPosition(this.cameraWorldPos);
+    this.tmpVec.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    this._calibSprite.position.copy(this.cameraWorldPos).add(this.tmpVec.multiplyScalar(2.0)).add(new THREE.Vector3(0, 1.2, 0));
+    this._calibSprite.quaternion.copy(this.camera.quaternion);
+    this._calibSprite.visible = true;
+  }
+
+  hideCalibHUD() { this._calibSprite.visible = false; }
+
+  // ── Audio ──
+  _initAudio() { this.audioCtx = null; }
+  ensureAudio() {
+    if (!this.audioCtx) this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  playBeatTick() {
+    if (!this.audioCtx) return;
+    const osc = this.audioCtx.createOscillator(), gain = this.audioCtx.createGain();
+    osc.type = 'sine'; osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.1, this.audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + 0.05);
+    osc.connect(gain); gain.connect(this.audioCtx.destination);
+    osc.start(); osc.stop(this.audioCtx.currentTime + 0.05);
+  }
+  playHitSound() {
+    if (!this.audioCtx) return;
+    const osc = this.audioCtx.createOscillator(), gain = this.audioCtx.createGain();
+    osc.type = 'square'; osc.frequency.value = 220;
+    gain.gain.setValueAtTime(0.15, this.audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + 0.1);
+    osc.connect(gain); gain.connect(this.audioCtx.destination);
+    osc.start(); osc.stop(this.audioCtx.currentTime + 0.1);
+  }
+
+  // ── Feedback sprites ──
+  showFeedback(pos, label, color) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256; canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    ctx.font = 'bold 48px Segoe UI, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillStyle = '#' + color.toString(16).padStart(6, '0');
+    ctx.fillText(label, 128, 72);
+    const tex = new THREE.CanvasTexture(canvas);
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+    sprite.position.set(pos[0], pos[1] + 0.3, pos[2]);
+    sprite.scale.set(0.8, 0.4, 1);
+    sprite.userData.life = 1.0;
+    this.scene.add(sprite);
+    this.feedbacks.push(sprite);
+  }
+
+  // ── Ink lines ──
+  createInkLine(hitPos, anchorPos, color, label) {
+    const C = this.C;
+    while (this.inkLines.length >= C.MAX_RESIDUE_MARKS) {
+      const old = this.inkLines.shift();
+      this.scene.remove(old); old.geometry.dispose(); old.material.dispose();
+    }
+    const opacity = label === 'PERFECT' ? 0.95 : label === 'GREAT' ? 0.75 : label === 'GOOD' ? 0.5 : 0.25;
+    const geo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(anchorPos[0], anchorPos[1], anchorPos[2]),
+      new THREE.Vector3(hitPos[0], hitPos[1], hitPos[2]),
+    ]);
+    const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity });
+    const line = new THREE.Line(geo, mat);
+    line.userData = { spawnTime: performance.now(), lifetime: C.INK_RESIDUE_LIFETIME * 1000,
+      fadeTime: C.INK_RESIDUE_FADE_TIME * 1000, baseOpacity: opacity };
+    this.scene.add(line);
+    this.inkLines.push(line);
+  }
+
+  // ── Haptic ──
+  pulseHaptic(controllerIndex) {
+    const src = this.xrControllers[controllerIndex]?.userData?.inputSource;
+    if (src?.gamepad?.hapticActuators?.length > 0) {
+      src.gamepad.hapticActuators[0].pulse(0.8, 100);
+    }
+  }
+
+  // ── Bind engine events ──
+  _bindEvents() {
+    const eng = this.engine;
+    eng.on('hit', (d) => {
+      this.createInkLine(d.hitPos, d.anchorPos, d.handColor, d.result.label);
+      const tag = d.result.angleAccuracy < 0.4 ? ' ✕' : '';
+      this.showFeedback([d.target.x, d.target.y, d.target.z], `${d.result.label} +${d.points}${tag}`, d.result.color);
+      this.playHitSound();
+      this.pulseHaptic(d.controllerIndex);
+      if (this.gloves[d.controllerIndex]) this.gloves[d.controllerIndex].scale.setScalar(1.5);
+    });
+    eng.on('miss', (d) => {
+      this.showFeedback([d.target.x, d.target.y, d.target.z], 'MISS', eng.config.MISS_COLOR);
+    });
+    eng.on('beat', () => { this.playBeatTick(); });
+    eng.on('calibrationProgress', (d) => { this.updateCalibHUD(d.progress, d.steady); this.updateAnchors(); });
+    eng.on('calibrationDone', () => { this.hideCalibHUD(); this.updateAnchors(); });
+  }
+
+  // ── Read XR controllers into engine ──
+  readControllers() {
+    for (let i = 0; i < 2; i++) {
+      const ctrl = this.xrControllers[i];
+      const wp = this.ctrlWorldPos[i];
+      ctrl.getWorldPosition(wp);
+      this.engine.controllers[i].pos[0] = wp.x;
+      this.engine.controllers[i].pos[1] = wp.y;
+      this.engine.controllers[i].pos[2] = wp.z;
+    }
+  }
+
+  // ── Sync target visuals to engine data ──
+  syncTargets() {
+    const eng = this.engine;
+    const alive = new Set();
+
+    for (const t of eng.targets) {
+      alive.add(t.id);
+      let mesh = this.targetMeshMap.get(t.id);
+      if (!mesh) {
+        mesh = this._getPooledTarget();
+        const variant = t.hand === 0 ? 'left' : 'right';
+        mesh.userData.disc.material = this._targetMats[variant].disc;
+        mesh.userData.ring.material = this._targetMats[variant].ring;
+        // Orient disc by punch type
+        const dir = t.expectedDir;
+        mesh.quaternion.setFromUnitVectors(
+          new THREE.Vector3(0, 0, 1),
+          new THREE.Vector3(-dir[0], -dir[1], -dir[2])
+        );
+        mesh.visible = true;
+        this.targetMeshMap.set(t.id, mesh);
+      }
+      mesh.position.set(t.x, t.y, t.z);
+      // Scale-in
+      const age = (performance.now() - t.spawnTime) / 1000;
+      const s = Math.min(age * 5, 1);
+      mesh.scale.setScalar(s);
+    }
+
+    // Hide removed targets
+    for (const [id, mesh] of this.targetMeshMap) {
+      if (!alive.has(id)) {
+        mesh.visible = false;
+        this.targetMeshMap.delete(id);
+      }
+    }
+  }
+
+  // ── Main render update ──
+  update(delta) {
+    const eng = this.engine;
+    const now = performance.now();
+
+    // Sync target meshes
+    this.syncTargets();
+
+    // Update trails
+    for (let i = 0; i < 2; i++) {
+      const ctrl = this.xrControllers[i];
+      const wp = this.ctrlWorldPos[i];
+      const trail = ctrl.userData.trail;
+      if (trail) {
+        const attr = trail.geometry.getAttribute('position');
+        const idx = (ctrl.userData.trailIndex % 30) * 3;
+        attr.array[idx] = wp.x; attr.array[idx+1] = wp.y; attr.array[idx+2] = wp.z;
+        attr.needsUpdate = true;
+        ctrl.userData.trailIndex++;
+      }
+      // Glove pulse decay
+      const g = this.gloves[i];
+      if (g && g.scale.x > 1.0) { g.scale.multiplyScalar(0.9); if (g.scale.x < 1.01) g.scale.setScalar(1.0); }
+    }
+
+    // Feedback sprites
+    for (let i = this.feedbacks.length - 1; i >= 0; i--) {
+      const fb = this.feedbacks[i];
+      fb.userData.life -= delta * 1.5;
+      if (fb.userData.life <= 0) {
+        this.scene.remove(fb); fb.material.dispose(); fb.material.map.dispose();
+        this.feedbacks.splice(i, 1);
+      } else { fb.position.y += delta * 0.5; fb.material.opacity = fb.userData.life; }
+    }
+
+    // Ink line fade
+    for (let i = this.inkLines.length - 1; i >= 0; i--) {
+      const r = this.inkLines[i];
+      const remaining = r.userData.lifetime - (now - r.userData.spawnTime);
+      if (remaining <= 0) {
+        this.scene.remove(r); r.geometry.dispose(); r.material.dispose();
+        this.inkLines.splice(i, 1);
+      } else if (remaining < r.userData.fadeTime) {
+        r.material.opacity = r.userData.baseOpacity * (remaining / r.userData.fadeTime);
+      }
+    }
+
+    // HUD position + update
+    if (eng.state.phase === 'playing') {
+      this.camera.getWorldPosition(this.cameraWorldPos);
+      this.tmpVec.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+      this._hudSprite.position.copy(this.cameraWorldPos).add(this.tmpVec.multiplyScalar(2.5)).add(new THREE.Vector3(0, 1.2, 0));
+      this._hudSprite.quaternion.copy(this.camera.quaternion);
+      this._hudSprite.visible = true;
+      this.updateHUD();
+    } else {
+      this._hudSprite.visible = false;
+    }
+
+    // Beat lighting pulse
+    if (eng.state.phase === 'playing') {
+      const beatPhase = ((now % (60000 / eng.config.BPM)) / (60000 / eng.config.BPM));
+      this.spotLight.intensity = 1.5 + 0.5 + 0.5 * Math.pow(1 - beatPhase, 3);
+    }
+  }
+}
+
+// ╔══════════════════════════════════════════════╗
+// ║  MAIN — wire Engine + Renderer               ║
+// ╚══════════════════════════════════════════════╝
+const engine = new Engine();
+const gfx = new GameRenderer(engine);
+
+// ── Main loop ──
+gfx.renderer.setAnimationLoop((timestamp, frame) => {
+  const delta = gfx.clock.getDelta();
+  gfx.readControllers();
+  engine.update(delta);
+  gfx.update(delta);
+  gfx.renderer.render(gfx.scene, gfx.camera);
 });
 
-// ─────────────────────────────────────────────
-// WEBXR SESSION MANAGEMENT
-// ─────────────────────────────────────────────
+// ── WebXR session ──
 const enterBtn = document.getElementById('enter-vr');
 const statusEl = document.getElementById('status');
 const overlay = document.getElementById('overlay');
@@ -1078,14 +979,12 @@ async function checkXR() {
     enterBtn.textContent = 'WebXR Not Available';
     return;
   }
-
   const supported = await navigator.xr.isSessionSupported('immersive-vr');
   if (supported) {
     enterBtn.disabled = false;
     enterBtn.textContent = 'ENTER VR';
     statusEl.textContent = 'Put on your headset and press the button';
   } else {
-    // Try inline mode for desktop testing
     enterBtn.disabled = false;
     enterBtn.textContent = 'START (Desktop Mode)';
     statusEl.textContent = 'No VR headset detected — desktop preview mode';
@@ -1094,16 +993,11 @@ async function checkXR() {
 }
 
 enterBtn.addEventListener('click', async () => {
-  initAudio();
+  gfx.ensureAudio();
 
   if (enterBtn.dataset.mode === 'inline') {
-    // Desktop mode — just start the game without VR
     overlay.style.display = 'none';
-    state.isPlaying = true;
-    state.sessionStart = performance.now();
-    state.lastBeatTime = performance.now();
-
-    // Add mouse-based controller simulation for desktop
+    engine.startPlaying();
     initDesktopControls();
     return;
   }
@@ -1113,186 +1007,142 @@ enterBtn.addEventListener('click', async () => {
       requiredFeatures: ['local-floor'],
       optionalFeatures: ['bounded-floor', 'hand-tracking'],
     });
-
-    renderer.xr.setReferenceSpaceType('local-floor');
-    await renderer.xr.setSession(session);
-
+    gfx.renderer.xr.setReferenceSpaceType('local-floor');
+    await gfx.renderer.xr.setSession(session);
     overlay.style.display = 'none';
-
-    // Enter calibration phase — game starts after calibration completes
-    state.isCalibrating = true;
-    calibration.steadyStart[0] = performance.now();
-    calibration.steadyStart[1] = performance.now();
+    engine.startCalibration();
 
     session.addEventListener('end', () => {
-      state.isPlaying = false;
+      engine.state.phase = 'idle';
       overlay.style.display = 'flex';
       showEndScreen();
     });
-
   } catch (err) {
     statusEl.textContent = `Failed to start VR: ${err.message}`;
   }
 });
 
-// ─────────────────────────────────────────────
-// DESKTOP PREVIEW (for testing without headset)
-// ─────────────────────────────────────────────
-function initDesktopControls() {
-  // Desktop overrides — relax thresholds for easy testing
-  CONFIG.HIT_DISTANCE = 1.2;        // much larger hit zone
-  CONFIG.MIN_PUNCH_VELOCITY = 0.0;  // no speed requirement
-  CONFIG.TARGET_SPEED = 2.0;        // slower targets
+// ── Toggle metronome with M key ──
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'm') {
+    engine.state.metronome = !engine.state.metronome;
+    gfx._hudPrev.score = -1; // force HUD redraw
+  }
+});
 
-  const mouse = new THREE.Vector2();
+// ── Desktop mode ──
+function initDesktopControls() {
+  engine.config.HIT_DISTANCE = 1.2;
+  engine.config.MIN_PUNCH_VELOCITY = 0.0;
+  engine.config.TARGET_SPEED = 2.0;
+
   let autoHitEnabled = true;
   const desktopClock = new THREE.Clock();
 
-  // On-screen instructions
   const hint = document.createElement('div');
-  hint.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:20;' +
-    'color:#888;font-size:13px;font-family:monospace;background:rgba(0,0,0,0.7);padding:8px 16px;border-radius:8px;';
-  hint.innerHTML = 'Desktop Test Mode — <b>Mouse</b>: aim | <b>Click</b>: punch | <b>Space</b>: toggle auto-hit | <b>WASD</b>: move';
+  hint.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:20;color:#888;font-size:13px;font-family:monospace;background:rgba(0,0,0,0.7);padding:8px 16px;border-radius:8px;';
+  hint.innerHTML = 'Desktop — <b>Mouse</b>: aim | <b>Click</b>: punch | <b>Space</b>: auto-hit | <b>M</b>: metronome | <b>WASD</b>: move';
   document.body.appendChild(hint);
 
-  // Auto-hit indicator
   const autoLabel = document.createElement('div');
-  autoLabel.style.cssText = 'position:fixed;top:40px;left:50%;transform:translateX(-50%);z-index:20;' +
-    'color:#0f0;font-size:12px;font-family:monospace;background:rgba(0,0,0,0.5);padding:4px 10px;border-radius:4px;';
+  autoLabel.style.cssText = 'position:fixed;top:40px;left:50%;transform:translateX(-50%);z-index:20;color:#0f0;font-size:12px;font-family:monospace;background:rgba(0,0,0,0.5);padding:4px 10px;border-radius:4px;';
   autoLabel.textContent = 'AUTO-HIT: ON';
   document.body.appendChild(autoLabel);
 
-  // Crosshair cursor
   const crosshair = document.createElement('div');
-  crosshair.style.cssText = 'position:fixed;width:20px;height:20px;pointer-events:none;z-index:25;' +
-    'border:2px solid rgba(255,107,53,0.8);border-radius:50%;transform:translate(-50%,-50%);' +
-    'box-shadow:0 0 10px rgba(255,107,53,0.3);';
+  crosshair.style.cssText = 'position:fixed;width:20px;height:20px;pointer-events:none;z-index:25;border:2px solid rgba(255,107,53,0.8);border-radius:50%;transform:translate(-50%,-50%);box-shadow:0 0 10px rgba(255,107,53,0.3);';
   document.body.appendChild(crosshair);
 
   document.addEventListener('mousemove', (e) => {
-    mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
-    mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
-
-    // Position crosshair
-    crosshair.style.left = e.clientX + 'px';
-    crosshair.style.top = e.clientY + 'px';
-
-    // Move virtual controllers to match mouse in 3D space
-    const x = mouse.x * 2;
-    const y = 1.3 + mouse.y * 0.8;
-    controllers[0].position.set(x - 0.15, y, -0.3);
-    controllers[1].position.set(x + 0.15, y, -0.3);
+    const mx = (e.clientX / window.innerWidth) * 2 - 1;
+    const my = -(e.clientY / window.innerHeight) * 2 + 1;
+    crosshair.style.left = e.clientX + 'px'; crosshair.style.top = e.clientY + 'px';
+    const x = mx * 2, y = 1.3 + my * 0.8;
+    gfx.xrControllers[0].position.set(x - 0.15, y, -0.3);
+    gfx.xrControllers[1].position.set(x + 0.15, y, -0.3);
   });
 
-  // Click = manual punch (always set high velocity)
   document.addEventListener('click', () => {
-    state.controllerVelocities[0].set(0, 0, -8);
-    state.controllerVelocities[1].set(0, 0, -8);
-    setTimeout(() => {
-      state.controllerVelocities[0].set(0, 0, 0);
-      state.controllerVelocities[1].set(0, 0, 0);
-    }, 150);
+    engine.controllers[0].vel = [0, 0, -8];
+    engine.controllers[1].vel = [0, 0, -8];
+    setTimeout(() => { engine.controllers[0].vel = [0,0,0]; engine.controllers[1].vel = [0,0,0]; }, 150);
   });
 
-  // Space = toggle auto-hit
   document.addEventListener('keydown', (e) => {
     if (e.code === 'Space') {
-      e.preventDefault();
-      autoHitEnabled = !autoHitEnabled;
+      e.preventDefault(); autoHitEnabled = !autoHitEnabled;
       autoLabel.textContent = 'AUTO-HIT: ' + (autoHitEnabled ? 'ON' : 'OFF');
       autoLabel.style.color = autoHitEnabled ? '#0f0' : '#f44';
     }
   });
 
-  // WASD camera
   const keys = {};
   document.addEventListener('keydown', (e) => { if (e.key.length === 1) keys[e.key.toLowerCase()] = true; });
   document.addEventListener('keyup', (e) => { if (e.key.length === 1) keys[e.key.toLowerCase()] = false; });
 
-  // Desktop game loop — auto-hit nearby targets
   function desktopUpdate() {
     const dt = desktopClock.getDelta();
+    const spd = 3 * dt;
+    if (keys['w']) gfx.camera.position.z -= spd;
+    if (keys['s']) gfx.camera.position.z += spd;
+    if (keys['a']) gfx.camera.position.x -= spd;
+    if (keys['d']) gfx.camera.position.x += spd;
 
-    // Camera movement
-    const speed = 3 * dt;
-    if (keys['w']) camera.position.z -= speed;
-    if (keys['s']) camera.position.z += speed;
-    if (keys['a']) camera.position.x -= speed;
-    if (keys['d']) camera.position.x += speed;
-
-    // Auto-hit: when targets get close, automatically punch them
     if (autoHitEnabled) {
-      for (const target of state.targets) {
-        if (target.userData.hit || !target.visible) continue;
-        // Auto-hit when target is within reach (z > -1.0)
-        if (target.position.z > -1.0) {
-          // Teleport controller to target and set velocity
-          const hand = target.userData.hand === 1 ? 1 : 0;
-          controllers[hand].position.copy(target.position);
-          controllers[hand].position.z += 0.1;
-          state.controllerVelocities[hand].set(0, 0, -6);
-          setTimeout(() => {
-            state.controllerVelocities[hand].set(0, 0, 0);
-          }, 80);
-          break; // one per frame
+      for (const t of engine.targets) {
+        if (t.hit) continue;
+        if (t.z > -1.0) {
+          const hand = t.hand === 1 ? 1 : 0;
+          gfx.xrControllers[hand].position.set(t.x, t.y, t.z + 0.1);
+          engine.controllers[hand].vel = [0, 0, -6];
+          setTimeout(() => { engine.controllers[hand].vel = [0,0,0]; }, 80);
+          break;
         }
       }
     }
-
     requestAnimationFrame(desktopUpdate);
   }
   desktopUpdate();
 }
 
-// ─────────────────────────────────────────────
-// END SCREEN
-// ─────────────────────────────────────────────
+// ── End screen ──
 function showEndScreen() {
+  const s = engine.state;
+  const totalHits = s.hits.perfect + s.hits.great + s.hits.good + s.hits.weak;
+  const acc = Math.round(totalHits / Math.max(1, totalHits + s.hits.miss) * 100);
   overlay.innerHTML = `
     <h1>SESSION COMPLETE</h1>
-    <div style="text-align:center; margin: 1rem 0;">
-      <p style="font-size:2.5rem; color:#ff6b35; font-weight:bold;">${state.score.toLocaleString()}</p>
+    <div style="text-align:center;margin:1rem 0;">
+      <p style="font-size:2.5rem;color:#ff6b35;font-weight:bold;">${s.score.toLocaleString()}</p>
       <p style="color:#888;">Total Score</p>
     </div>
-    <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin:1rem 0; text-align:center;">
-      <div><span style="color:#ffd700; font-size:1.5rem;">${state.maxCombo}x</span><br><span style="color:#888;">Max Combo</span></div>
-      <div><span style="color:#00ff88; font-size:1.5rem;">${Math.round(state.calories)}</span><br><span style="color:#888;">Calories</span></div>
-      <div><span style="color:#4488ff; font-size:1.5rem;">${state.totalPunches}</span><br><span style="color:#888;">Punches</span></div>
-      <div><span style="color:#ff6b35; font-size:1.5rem;">${
-        Math.round((state.hits.perfect + state.hits.great + state.hits.good + state.hits.weak) /
-        Math.max(1, state.hits.perfect + state.hits.great + state.hits.good + state.hits.weak + state.hits.miss) * 100)
-      }%</span><br><span style="color:#888;">Accuracy</span></div>
-      <div><span style="color:#886644; font-size:1.5rem;">${state.hits.weak}</span><br><span style="color:#888;">Weak</span></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0;text-align:center;">
+      <div><span style="color:#ffd700;font-size:1.5rem;">${s.maxCombo}x</span><br><span style="color:#888;">Max Combo</span></div>
+      <div><span style="color:#00ff88;font-size:1.5rem;">${Math.round(s.calories)}</span><br><span style="color:#888;">Calories</span></div>
+      <div><span style="color:#4488ff;font-size:1.5rem;">${s.totalPunches}</span><br><span style="color:#888;">Punches</span></div>
+      <div><span style="color:#ff6b35;font-size:1.5rem;">${acc}%</span><br><span style="color:#888;">Accuracy</span></div>
     </div>
-    <button id="enter-vr" onclick="location.reload()" style="
-      padding:1rem 2.5rem; font-size:1.2rem; border:none; border-radius:50px;
-      cursor:pointer; background:linear-gradient(135deg,#ff6b35,#e8552a);
-      color:#fff; font-weight:600; margin-top:1rem;
-    ">PLAY AGAIN</button>
+    <button id="enter-vr" onclick="location.reload()" style="padding:1rem 2.5rem;font-size:1.2rem;border:none;border-radius:50px;cursor:pointer;background:linear-gradient(135deg,#ff6b35,#e8552a);color:#fff;font-weight:600;margin-top:1rem;">PLAY AGAIN</button>
   `;
 }
 
-// ─────────────────────────────────────────────
-// RESIZE
-// ─────────────────────────────────────────────
+// ── Resize ──
 window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  gfx.camera.aspect = window.innerWidth / window.innerHeight;
+  gfx.camera.updateProjectionMatrix();
+  gfx.renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
 checkXR();
 
-// ── Debug info (press D to toggle) ──
+// ── Debug ──
 const debugEl = document.getElementById('debug');
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'd') {
-    debugEl.style.display = debugEl.style.display === 'none' ? 'block' : 'none';
-  }
+  if (e.key === 'd') debugEl.style.display = debugEl.style.display === 'none' ? 'block' : 'none';
 });
 setInterval(() => {
   if (debugEl.style.display === 'none') return;
-  debugEl.textContent = `FPS: -- | Targets: ${state.targets.length} | Score: ${state.score}`;
+  debugEl.textContent = `FPS: -- | Targets: ${engine.targets.length} | Score: ${engine.state.score} | ${engine.state.metronome ? 'METRO' : 'FREE'}`;
 }, 200);
 
 </script>
