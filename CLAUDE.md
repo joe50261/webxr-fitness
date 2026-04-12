@@ -36,3 +36,25 @@ Subjective adjustments and their rationale. Update this section when tuning para
 - Ink = single line from anchor center to controller position at closest approach.
 - Color = hand (left blue, right red). Opacity = precision (deep=accurate).
 - Miss = no line, only floating text. No visual clutter for non-events.
+
+## Development Process Notes
+Lessons learned during development. Follow these to avoid repeated mistakes.
+
+### File editing strategy
+- **Large refactors (>200 lines changed)**: write parts to temp files, concatenate with `cat`, then verify. Do NOT use Edit tool piecemeal on a 1000+ line file — partial edits leave orphan code mixed with new code, causing cascading failures.
+- **Small fixes (<50 lines)**: Edit tool is fine. Read the target lines first.
+- **Always verify after edit**: `grep` for duplicate function definitions, check syntax with `node -e`, count lines with `wc -l`.
+
+### Common logic pitfalls found in this project
+- **First-contact scoring is wrong**: collision must track closest-approach distance, not the distance at entry into the hit zone. First-contact always gives worst score.
+- **Miss zone must be far from ideal hit zone**: MISS_DISTANCE was -0.5 while ideal hit was -0.3, only 20cm apart. Miss must be well behind the player (z=2.0) to give the closest-approach system room to work.
+- **Haptic controller mapping**: `session.inputSources[index]` order does NOT match `renderer.xr.getController(index)`. Store `inputSource` on the controller's `connected` event.
+- **Ink mark position must use controller pos, not target pos**: the target is moving — the mark should show where the player's fist was at closest approach.
+- **No randomness in positions**: targets and anchors use exact pattern coordinates. Randomness prevents building muscle memory.
+
+### Architecture decisions
+- Single-file `index.html` with Engine/Renderer classes (no build step, CDN imports). Chose this over multi-file because GitHub Pages serves static HTML directly.
+- Engine class: pure arrays `[x,y,z]` for positions/velocities, no Three.js types. This keeps engine testable and framework-independent.
+- Renderer syncs to engine via `Map<targetId, mesh>` — engine creates/removes data objects, renderer maps them to pooled Three.js meshes each frame.
+- Event system (`engine.on/emit`) for one-way engine→renderer notifications (hit, miss, beat, calibration). Renderer never calls engine logic directly except `update()`.
+
