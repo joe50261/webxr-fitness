@@ -51,7 +51,7 @@
   <p>WebXR 6DoF Rhythm Fighting</p>
   <button id="enter-vr" disabled>Checking WebXR...</button>
   <div id="status"></div>
-  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.6.7-speech-fix</div>
+  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.6.8-formant-voice</div>
 </div>
 
 <div id="debug"></div>
@@ -875,24 +875,100 @@ class GameRenderer {
     }
   }
 
-  // ── Speech — announce punch type ──
-  warmUpSpeech() {
-    // Must be called from user gesture to unlock speechSynthesis
-    if (!window.speechSynthesis) return;
-    const utt = new SpeechSynthesisUtterance('');
-    utt.volume = 0;
-    speechSynthesis.speak(utt);
+  // ── Pre-rendered vocal punch calls ──
+  // Formant synthesis: consonant noise + vowel harmonics = speech-like audio
+  async preRenderPunchSounds() {
+    const sr = 22050;
+    // Phonetic specs: [segments] where each segment = { type, dur, ... }
+    // vowel: formant frequencies (F1,F2,F3), consonant: noise with filter
+    const words = {
+      jab: [
+        { type: 'noise', dur: 0.04, freq: 3000, q: 2 },          // "j" fricative
+        { type: 'vowel', dur: 0.12, f1: 750, f2: 1800, f3: 2600 }, // "a" open
+        { type: 'stop',  dur: 0.03 },                              // "b" closure
+      ],
+      cross: [
+        { type: 'noise', dur: 0.03, freq: 4000, q: 5 },          // "k" burst
+        { type: 'vowel', dur: 0.10, f1: 600, f2: 1000, f3: 2500 }, // "o"
+        { type: 'noise', dur: 0.08, freq: 6000, q: 1 },          // "ss" sibilant
+      ],
+      hook_l: [
+        { type: 'noise', dur: 0.04, freq: 1500, q: 0.5 },        // "h" breath
+        { type: 'vowel', dur: 0.14, f1: 400, f2: 1100, f3: 2400 }, // "oo" round
+        { type: 'noise', dur: 0.03, freq: 4000, q: 5 },          // "k"
+      ],
+      hook_r: null, // same as hook_l
+      uppercut: [
+        { type: 'vowel', dur: 0.08, f1: 650, f2: 1200, f3: 2500 }, // "uh"
+        { type: 'stop',  dur: 0.04 },                              // "p"
+        { type: 'noise', dur: 0.02, freq: 3500, q: 3 },          // "p" release
+        { type: 'vowel', dur: 0.10, f1: 500, f2: 1500, f3: 2500 }, // "er"
+      ],
+    };
+    words.hook_r = words.hook_l;
+
+    this.punchSounds = {};
+    for (const [name, segs] of Object.entries(words)) {
+      if (!segs) continue;
+      const totalDur = segs.reduce((s, seg) => s + seg.dur, 0);
+      const offline = new OfflineAudioContext(1, Math.ceil(sr * totalDur), sr);
+      let offset = 0;
+      for (const seg of segs) {
+        if (seg.type === 'vowel') {
+          // Sum of 3 formant oscillators with sawtooth (voiced)
+          for (const f of [seg.f1, seg.f2, seg.f3]) {
+            const osc = offline.createOscillator();
+            osc.type = 'sawtooth';
+            osc.frequency.value = f;
+            const bp = offline.createBiquadFilter();
+            bp.type = 'bandpass'; bp.frequency.value = f; bp.Q.value = 8;
+            const g = offline.createGain();
+            g.gain.setValueAtTime(0, offset);
+            g.gain.linearRampToValueAtTime(0.15, offset + 0.01);
+            g.gain.setValueAtTime(0.15, offset + seg.dur - 0.01);
+            g.gain.linearRampToValueAtTime(0, offset + seg.dur);
+            osc.connect(bp); bp.connect(g); g.connect(offline.destination);
+            osc.start(offset); osc.stop(offset + seg.dur);
+          }
+          // Add fundamental pitch (voice)
+          const fund = offline.createOscillator();
+          fund.type = 'sawtooth'; fund.frequency.value = 120;
+          const fg = offline.createGain();
+          fg.gain.setValueAtTime(0, offset);
+          fg.gain.linearRampToValueAtTime(0.08, offset + 0.01);
+          fg.gain.setValueAtTime(0.08, offset + seg.dur - 0.01);
+          fg.gain.linearRampToValueAtTime(0, offset + seg.dur);
+          fund.connect(fg); fg.connect(offline.destination);
+          fund.start(offset); fund.stop(offset + seg.dur);
+        } else if (seg.type === 'noise') {
+          const buf = offline.createBuffer(1, Math.ceil(sr * seg.dur), sr);
+          const d = buf.getChannelData(0);
+          for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+          const src = offline.createBufferSource(); src.buffer = buf;
+          const bp = offline.createBiquadFilter();
+          bp.type = 'bandpass'; bp.frequency.value = seg.freq; bp.Q.value = seg.q;
+          const g = offline.createGain();
+          g.gain.setValueAtTime(0.25, offset);
+          g.gain.linearRampToValueAtTime(0.001, offset + seg.dur);
+          src.connect(bp); bp.connect(g); g.connect(offline.destination);
+          src.start(offset);
+        }
+        // 'stop' = silence gap, just advance offset
+        offset += seg.dur;
+      }
+      this.punchSounds[name] = await offline.startRendering();
+    }
   }
-  speakPunch(punch) {
-    if (!window.speechSynthesis) return;
-    const names = { jab: 'jab', cross: 'cross', hook_l: 'hook', hook_r: 'hook', uppercut: 'upper' };
-    speechSynthesis.cancel(); // clear queue to avoid overlap
-    const utt = new SpeechSynthesisUtterance(names[punch] || punch);
-    utt.rate = 2.0;
-    utt.pitch = 1.2;
-    utt.volume = 0.8;
-    utt.lang = 'en-US';
-    speechSynthesis.speak(utt);
+  playPunchCall(punch, pan = 0) {
+    if (!this.audioCtx || !this.punchSounds?.[punch]) return;
+    const src = this.audioCtx.createBufferSource();
+    src.buffer = this.punchSounds[punch];
+    const g = this.audioCtx.createGain();
+    g.gain.value = 1.5; // boost vocal volume
+    const panner = this.audioCtx.createStereoPanner();
+    panner.pan.value = pan;
+    src.connect(g); g.connect(panner); panner.connect(this.audioCtx.destination);
+    src.start();
   }
 
   // ── Bind engine events ──
@@ -911,7 +987,7 @@ class GameRenderer {
     });
     eng.on('beat', (d) => {
       this.playBeatTick(d.hand === 0 ? -1 : 1, d.punch);
-      this.speakPunch(d.punch);
+      this.playPunchCall(d.punch, d.hand === 0 ? -1 : 1);
     });
     eng.on('calibrationProgress', (d) => { this.updateCalibHUD(d.progress, d.steady); this.updateAnchors(); });
     eng.on('calibrationDone', () => { this.hideCalibHUD(); this.updateAnchors(); });
@@ -1076,7 +1152,7 @@ async function checkXR() {
 
 enterBtn.addEventListener('click', async () => {
   gfx.ensureAudio();
-  gfx.warmUpSpeech();
+  gfx.preRenderPunchSounds();
 
   if (enterBtn.dataset.mode === 'inline') {
     overlay.style.display = 'none';
