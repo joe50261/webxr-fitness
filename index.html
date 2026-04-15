@@ -51,7 +51,7 @@
   <p>WebXR 6DoF Rhythm Fighting</p>
   <button id="enter-vr" disabled>Checking WebXR...</button>
   <div id="status"></div>
-  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.6.3-derived-pos</div>
+  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.6.4-stereo-beat</div>
 </div>
 
 <div id="debug"></div>
@@ -292,6 +292,7 @@ class Engine {
         beatTime: beatTime || null,
         anchorZ: anchorZ,
       });
+      this.state._lastSpawnedHand = pos.hand;
       this.emit('targetSpawned', this.targets[this.targets.length - 1]);
     }
   }
@@ -323,7 +324,7 @@ class Engine {
         this.state.lastBeatTime = nextBeat;
         this.state.beatIndex++;
         this.state._metroSpawned = false;
-        this.emit('beat', this.state.beatIndex);
+        this.emit('beat', { hand: this.state._lastSpawnedHand });
       }
     } else {
       // Free mode: spawn on beat tick, no beatTime
@@ -331,7 +332,7 @@ class Engine {
         this.state.lastBeatTime = now;
         this.state.beatIndex++;
         this.spawnTarget(null);
-        this.emit('beat', this.state.beatIndex);
+        this.emit('beat', { hand: this.state._lastSpawnedHand });
       }
     }
 
@@ -773,13 +774,15 @@ class GameRenderer {
   ensureAudio() {
     if (!this.audioCtx) this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   }
-  playBeatTick() {
+  playBeatTick(pan = 0) {
     if (!this.audioCtx) return;
     const osc = this.audioCtx.createOscillator(), gain = this.audioCtx.createGain();
     osc.type = 'sine'; osc.frequency.value = 880;
     gain.gain.setValueAtTime(0.1, this.audioCtx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + 0.05);
-    osc.connect(gain); gain.connect(this.audioCtx.destination);
+    const panner = this.audioCtx.createStereoPanner();
+    panner.pan.value = pan;
+    osc.connect(gain); gain.connect(panner); panner.connect(this.audioCtx.destination);
     osc.start(); osc.stop(this.audioCtx.currentTime + 0.05);
   }
   playHitSound() {
@@ -851,7 +854,7 @@ class GameRenderer {
     eng.on('miss', (d) => {
       this.showFeedback([d.target.x, d.target.y, d.target.z], 'MISS', eng.config.MISS_COLOR);
     });
-    eng.on('beat', () => { this.playBeatTick(); });
+    eng.on('beat', (d) => { this.playBeatTick(d.hand === 0 ? -1 : 1); });
     eng.on('calibrationProgress', (d) => { this.updateCalibHUD(d.progress, d.steady); this.updateAnchors(); });
     eng.on('calibrationDone', () => { this.hideCalibHUD(); this.updateAnchors(); });
   }
