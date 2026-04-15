@@ -51,7 +51,7 @@
   <p>WebXR 6DoF Rhythm Fighting</p>
   <button id="enter-vr" disabled>Checking WebXR...</button>
   <div id="status"></div>
-  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.6.1-vr-toggle</div>
+  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.6.2-metronome</div>
 </div>
 
 <div id="debug"></div>
@@ -306,14 +306,22 @@ class Engine {
 
     // Beat spawning
     if (this.state.metronome) {
-      // Metronome mode: schedule spawn so target arrives at anchor on beat
+      // Metronome mode: spawn target early so it arrives at anchor on beat.
+      // Beat sound plays at arrival time. Targets exist for collision but
+      // renderer hides them — player punches by ear + anchor position.
       const beatMs = this.beatIntervalMs();
       const nextBeatTime = this.state.lastBeatTime + beatMs;
-      const spawnLeadTime = this.travelDuration() * 1000;
-      if (now >= nextBeatTime - spawnLeadTime && now - this.state.lastBeatTime >= beatMs * 0.5) {
+      const leadMs = this.travelDuration() * 1000;
+      // Spawn early
+      if (!this.state._metroSpawned && now >= nextBeatTime - leadMs) {
+        this.state._metroSpawned = true;
+        this.spawnTarget();
+      }
+      // Beat tick at arrival time
+      if (now >= nextBeatTime) {
         this.state.lastBeatTime = nextBeatTime;
         this.state.beatIndex++;
-        this.spawnTarget();
+        this.state._metroSpawned = false;
         this.emit('beat', this.state.beatIndex);
       }
     } else {
@@ -871,10 +879,11 @@ class GameRenderer {
           new THREE.Vector3(0, 0, 1),
           new THREE.Vector3(-dir[0], -dir[1], -dir[2])
         );
-        mesh.visible = true;
+        mesh.visible = !eng.state.metronome; // hidden in metronome mode
         this.targetMeshMap.set(t.id, mesh);
       }
       mesh.position.set(t.x, t.y, t.z);
+      mesh.visible = !eng.state.metronome;
       // Scale-in
       const age = (performance.now() - t.spawnTime) / 1000;
       const s = Math.min(age * 5, 1);
