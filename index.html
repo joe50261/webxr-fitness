@@ -51,7 +51,7 @@
   <p>WebXR 6DoF Rhythm Fighting</p>
   <button id="enter-vr" disabled>Checking WebXR...</button>
   <div id="status"></div>
-  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.6.4-stereo-beat</div>
+  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.6.5-punch-audio</div>
 </div>
 
 <div id="debug"></div>
@@ -293,6 +293,7 @@ class Engine {
         anchorZ: anchorZ,
       });
       this.state._lastSpawnedHand = pos.hand;
+      this.state._lastSpawnedPunch = pos.punch || 'jab';
       this.emit('targetSpawned', this.targets[this.targets.length - 1]);
     }
   }
@@ -324,7 +325,7 @@ class Engine {
         this.state.lastBeatTime = nextBeat;
         this.state.beatIndex++;
         this.state._metroSpawned = false;
-        this.emit('beat', { hand: this.state._lastSpawnedHand });
+        this.emit('beat', { hand: this.state._lastSpawnedHand, punch: this.state._lastSpawnedPunch });
       }
     } else {
       // Free mode: spawn on beat tick, no beatTime
@@ -332,7 +333,7 @@ class Engine {
         this.state.lastBeatTime = now;
         this.state.beatIndex++;
         this.spawnTarget(null);
-        this.emit('beat', { hand: this.state._lastSpawnedHand });
+        this.emit('beat', { hand: this.state._lastSpawnedHand, punch: this.state._lastSpawnedPunch });
       }
     }
 
@@ -774,16 +775,50 @@ class GameRenderer {
   ensureAudio() {
     if (!this.audioCtx) this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   }
-  playBeatTick(pan = 0) {
+  // Punch-type audio cues — distinct timbre per type
+  playBeatTick(pan = 0, punch = 'jab') {
     if (!this.audioCtx) return;
-    const osc = this.audioCtx.createOscillator(), gain = this.audioCtx.createGain();
-    osc.type = 'sine'; osc.frequency.value = 880;
-    gain.gain.setValueAtTime(0.1, this.audioCtx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + 0.05);
-    const panner = this.audioCtx.createStereoPanner();
+    const ctx = this.audioCtx;
+    const t = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const panner = ctx.createStereoPanner();
     panner.pan.value = pan;
-    osc.connect(gain); gain.connect(panner); panner.connect(this.audioCtx.destination);
-    osc.start(); osc.stop(this.audioCtx.currentTime + 0.05);
+
+    // Sound profile per punch type
+    switch (punch) {
+      case 'jab':
+        osc.type = 'sine'; osc.frequency.value = 880;
+        gain.gain.setValueAtTime(0.12, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+        osc.connect(gain); gain.connect(panner); panner.connect(ctx.destination);
+        osc.start(); osc.stop(t + 0.05);
+        break;
+      case 'cross':
+        osc.type = 'sine'; osc.frequency.value = 660;
+        gain.gain.setValueAtTime(0.12, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+        osc.connect(gain); gain.connect(panner); panner.connect(ctx.destination);
+        osc.start(); osc.stop(t + 0.06);
+        break;
+      case 'hook_l':
+      case 'hook_r':
+        osc.type = 'triangle'; osc.frequency.setValueAtTime(440, t);
+        osc.frequency.linearRampToValueAtTime(330, t + 0.08);
+        gain.gain.setValueAtTime(0.15, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+        osc.connect(gain); gain.connect(panner); panner.connect(ctx.destination);
+        osc.start(); osc.stop(t + 0.08);
+        break;
+      case 'uppercut':
+        osc.type = 'square'; osc.frequency.setValueAtTime(220, t);
+        osc.frequency.linearRampToValueAtTime(440, t + 0.08);
+        gain.gain.setValueAtTime(0.1, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+        osc.connect(gain); gain.connect(panner); panner.connect(ctx.destination);
+        osc.start(); osc.stop(t + 0.08);
+        break;
+    }
   }
   playHitSound() {
     if (!this.audioCtx) return;
@@ -854,7 +889,7 @@ class GameRenderer {
     eng.on('miss', (d) => {
       this.showFeedback([d.target.x, d.target.y, d.target.z], 'MISS', eng.config.MISS_COLOR);
     });
-    eng.on('beat', (d) => { this.playBeatTick(d.hand === 0 ? -1 : 1); });
+    eng.on('beat', (d) => { this.playBeatTick(d.hand === 0 ? -1 : 1, d.punch); });
     eng.on('calibrationProgress', (d) => { this.updateCalibHUD(d.progress, d.steady); this.updateAnchors(); });
     eng.on('calibrationDone', () => { this.hideCalibHUD(); this.updateAnchors(); });
   }
