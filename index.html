@@ -51,7 +51,7 @@
   <p>WebXR 6DoF Rhythm Fighting</p>
   <button id="enter-vr" disabled>Checking WebXR...</button>
   <div id="status"></div>
-  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.6.2-metronome</div>
+  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.6.3-derived-pos</div>
 </div>
 
 <div id="debug"></div>
@@ -273,8 +273,9 @@ class Engine {
   }
 
   // ── Spawn ──
-  spawnTarget() {
+  spawnTarget(beatTime) {
     const pat = this.patterns[Math.floor(Math.random() * this.patterns.length)];
+    const anchorZ = (this.calibration.left.z + this.calibration.right.z) / 2;
     for (const pos of pat.positions) {
       const punch = this.punchTypes[pos.punch || 'jab'];
       const id = this.state.nextTargetId++;
@@ -287,6 +288,9 @@ class Engine {
         hit: false,
         tracking: null,
         spawnTime: performance.now(),
+        // beatTime = when this target should be at anchorZ
+        beatTime: beatTime || null,
+        anchorZ: anchorZ,
       });
       this.emit('targetSpawned', this.targets[this.targets.length - 1]);
     }
@@ -305,31 +309,28 @@ class Engine {
     const C = this.config;
 
     // Beat spawning
+    const beatMs = this.beatIntervalMs();
     if (this.state.metronome) {
-      // Metronome mode: spawn target early so it arrives at anchor on beat.
-      // Beat sound plays at arrival time. Targets exist for collision but
-      // renderer hides them — player punches by ear + anchor position.
-      const beatMs = this.beatIntervalMs();
-      const nextBeatTime = this.state.lastBeatTime + beatMs;
+      // Metronome mode: spawn with beatTime so position is derived, not accumulated.
+      // Beat tick plays at arrival (beatTime).
+      const nextBeat = this.state.lastBeatTime + beatMs;
       const leadMs = this.travelDuration() * 1000;
-      // Spawn early
-      if (!this.state._metroSpawned && now >= nextBeatTime - leadMs) {
+      if (!this.state._metroSpawned && now >= nextBeat - leadMs) {
         this.state._metroSpawned = true;
-        this.spawnTarget();
+        this.spawnTarget(nextBeat);
       }
-      // Beat tick at arrival time
-      if (now >= nextBeatTime) {
-        this.state.lastBeatTime = nextBeatTime;
+      if (now >= nextBeat) {
+        this.state.lastBeatTime = nextBeat;
         this.state.beatIndex++;
         this.state._metroSpawned = false;
         this.emit('beat', this.state.beatIndex);
       }
     } else {
-      // Free mode: spawn on beat tick
-      if (now - this.state.lastBeatTime > this.beatIntervalMs()) {
+      // Free mode: spawn on beat tick, no beatTime
+      if (now - this.state.lastBeatTime > beatMs) {
         this.state.lastBeatTime = now;
         this.state.beatIndex++;
-        this.spawnTarget();
+        this.spawnTarget(null);
         this.emit('beat', this.state.beatIndex);
       }
     }
@@ -341,8 +342,15 @@ class Engine {
       const t = this.targets[i];
       if (t.hit) { this.targets.splice(i, 1); continue; }
 
-      // Move toward player
-      t.z += C.TARGET_SPEED * delta;
+      // Position calculation
+      if (t.beatTime) {
+        // Derived position: z = anchorZ - remainingTime * speed (zero drift)
+        const remaining = (t.beatTime - now) / 1000;
+        t.z = t.anchorZ - remaining * C.TARGET_SPEED;
+      } else {
+        // Free mode: velocity accumulation
+        t.z += C.TARGET_SPEED * delta;
+      }
 
       // Scale-in (renderer reads this)
       if (!t.scaleReady && t.z > -C.SPAWN_DISTANCE + 1) t.scaleReady = true;
