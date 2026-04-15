@@ -51,7 +51,7 @@
   <p>WebXR 6DoF Rhythm Fighting</p>
   <button id="enter-vr" disabled>Checking WebXR...</button>
   <div id="status"></div>
-  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.6.0-engine</div>
+  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.6.1-vr-toggle</div>
 </div>
 
 <div id="debug"></div>
@@ -571,6 +571,10 @@ class GameRenderer {
 
       ctrl.addEventListener('connected', (e) => { ctrl.userData.inputSource = e.data; });
       ctrl.addEventListener('disconnected', () => { ctrl.userData.inputSource = null; });
+      ctrl.addEventListener('squeezestart', () => {
+        this.engine.state.metronome = !this.engine.state.metronome;
+        this._hudPrev.score = -1;
+      });
 
       const grip = this.renderer.xr.getControllerGrip(i);
       grip.add(factory.createControllerModel(grip));
