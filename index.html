@@ -51,7 +51,7 @@
   <p>WebXR 6DoF Rhythm Fighting</p>
   <button id="enter-vr" disabled>Checking WebXR...</button>
   <div id="status"></div>
-  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.6.5-punch-audio</div>
+  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.6.6-speech</div>
 </div>
 
 <div id="debug"></div>
@@ -875,6 +875,17 @@ class GameRenderer {
     }
   }
 
+  // ── Speech — announce punch type ──
+  speakPunch(punch) {
+    if (!window.speechSynthesis) return;
+    const names = { jab: 'jab', cross: 'cross', hook_l: 'hook', hook_r: 'hook', uppercut: 'upper' };
+    const utt = new SpeechSynthesisUtterance(names[punch] || punch);
+    utt.rate = 2.0;   // fast
+    utt.pitch = 1.2;
+    utt.volume = 0.7;
+    speechSynthesis.speak(utt);
+  }
+
   // ── Bind engine events ──
   _bindEvents() {
     const eng = this.engine;
@@ -889,7 +900,10 @@ class GameRenderer {
     eng.on('miss', (d) => {
       this.showFeedback([d.target.x, d.target.y, d.target.z], 'MISS', eng.config.MISS_COLOR);
     });
-    eng.on('beat', (d) => { this.playBeatTick(d.hand === 0 ? -1 : 1, d.punch); });
+    eng.on('beat', (d) => {
+      this.playBeatTick(d.hand === 0 ? -1 : 1, d.punch);
+      this.speakPunch(d.punch);
+    });
     eng.on('calibrationProgress', (d) => { this.updateCalibHUD(d.progress, d.steady); this.updateAnchors(); });
     eng.on('calibrationDone', () => { this.hideCalibHUD(); this.updateAnchors(); });
   }
