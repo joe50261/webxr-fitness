@@ -51,7 +51,7 @@
   <p>WebXR 6DoF Combat Fitness</p>
   <button id="enter-vr" disabled>Checking WebXR...</button>
   <div id="status"></div>
-  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.7.0-sphere-collision</div>
+  <div id="version" style="position:fixed;bottom:10px;right:10px;color:#444;font-size:12px;font-family:monospace;">v0.7.1-dual-sphere</div>
 </div>
 
 <div id="debug"></div>
@@ -263,6 +263,7 @@ class Engine {
         punchType: pos.punch || 'jab',
         expectedDir: punch.dir.slice(),
         hit: false,
+        tracking: null,
         spawnTime: performance.now(),
         anchorZ: anchorZ,
       });
@@ -335,9 +336,23 @@ class Engine {
       const dx = ctrl.pos[0] - t.x, dy = ctrl.pos[1] - t.y, dz = ctrl.pos[2] - t.z;
       const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
       const speed = Math.sqrt(ctrl.vel[0]**2 + ctrl.vel[1]**2 + ctrl.vel[2]**2);
-      if (dist < C.HIT_DISTANCE && speed > C.MIN_PUNCH_VELOCITY) {
-        this.onHit(t, idx, c, dist, ctrl.pos.slice());
-        return;
+
+      if (dist < C.HIT_DISTANCE) {
+        if (!t.tracking) {
+          t.tracking = { controller: c, minDist: dist, hitPos: ctrl.pos.slice(), maxSpeed: speed };
+        } else if (t.tracking.controller === c) {
+          if (dist < t.tracking.minDist) {
+            t.tracking.minDist = dist;
+            t.tracking.hitPos = ctrl.pos.slice();
+          }
+          if (speed > t.tracking.maxSpeed) t.tracking.maxSpeed = speed;
+        }
+      } else if (t.tracking && t.tracking.controller === c) {
+        if (t.tracking.maxSpeed > C.MIN_PUNCH_VELOCITY) {
+          this.onHit(t, idx, c, t.tracking.minDist, t.tracking.hitPos);
+          return;
+        }
+        t.tracking = null;
       }
     }
   }
@@ -534,34 +549,24 @@ class GameRenderer {
   _createTargetPool() {
     this.targetPool = [];
     const C = this.C;
-    const discGeo = new THREE.CircleGeometry(C.TARGET_RADIUS, 24);
-    const ringGeo = new THREE.RingGeometry(C.TARGET_RADIUS * 0.85, C.TARGET_RADIUS, 24);
-    this._targetDiscGeo = discGeo;
-    this._targetRingGeo = ringGeo;
+    this._targetSphereGeo = new THREE.SphereGeometry(C.TARGET_RADIUS, 16, 16);
 
-    const makeDisc = (c) => new THREE.MeshStandardMaterial({
-      color: c, emissive: c, emissiveIntensity: 0.5, transparent: true, opacity: 0.9, side: THREE.DoubleSide,
-    });
-    const makeRing = () => new THREE.MeshBasicMaterial({
-      color: 0xffffff, transparent: true, opacity: 0.4, side: THREE.DoubleSide,
+    const makeMat = (c) => new THREE.MeshStandardMaterial({
+      color: c, emissive: c, emissiveIntensity: 0.5, transparent: true, opacity: 0.85,
     });
     this._targetMats = {
-      left: { disc: makeDisc(C.LEFT_COLOR), ring: makeRing() },
-      right: { disc: makeDisc(C.RIGHT_COLOR), ring: makeRing() },
+      left: makeMat(C.LEFT_COLOR),
+      right: makeMat(C.RIGHT_COLOR),
     };
 
     for (let i = 0; i < 20; i++) this.targetPool.push(this._makeTargetMesh());
   }
 
   _makeTargetMesh() {
-    const g = new THREE.Group();
-    const disc = new THREE.Mesh(this._targetDiscGeo, this._targetMats.left.disc);
-    g.add(disc); g.userData.disc = disc;
-    const ring = new THREE.Mesh(this._targetRingGeo, this._targetMats.left.ring);
-    g.add(ring); g.userData.ring = ring;
-    g.visible = false;
-    this.scene.add(g);
-    return g;
+    const mesh = new THREE.Mesh(this._targetSphereGeo, this._targetMats.left);
+    mesh.visible = false;
+    this.scene.add(mesh);
+    return mesh;
   }
 
   _getPooledTarget() {
@@ -777,14 +782,7 @@ class GameRenderer {
       let mesh = this.targetMeshMap.get(t.id);
       if (!mesh) {
         mesh = this._getPooledTarget();
-        const variant = t.hand === 0 ? 'left' : 'right';
-        mesh.userData.disc.material = this._targetMats[variant].disc;
-        mesh.userData.ring.material = this._targetMats[variant].ring;
-        const dir = t.expectedDir;
-        mesh.quaternion.setFromUnitVectors(
-          new THREE.Vector3(0, 0, 1),
-          new THREE.Vector3(-dir[0], -dir[1], -dir[2])
-        );
+        mesh.material = this._targetMats[t.hand === 0 ? 'left' : 'right'];
         mesh.visible = true;
         this.targetMeshMap.set(t.id, mesh);
       }

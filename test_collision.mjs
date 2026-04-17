@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Automated collision test — extracts Engine from index.html and simulates punches.
+// Collision test — extracts Engine from index.html and simulates punches.
 import { readFileSync } from 'fs';
 
 const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
@@ -36,6 +36,7 @@ function placeTarget(engine, x, y, z, hand = 1) {
     punchType: 'cross',
     expectedDir: [0, 0, -1],
     hit: false,
+    tracking: null,
     spawnTime: performance.now() - 2000,
     anchorZ: -0.5,
     scaleReady: true,
@@ -44,197 +45,177 @@ function placeTarget(engine, x, y, z, hand = 1) {
   return t;
 }
 
-// ── Test 1: Controller approaching target from front — per-frame distances ──
+function simPunch(engine, cx, cy, tz, hand, speed, fps = 72) {
+  const dt = 1 / fps;
+  const step = speed * dt;
+  let hitResult = null;
+  engine.on('hit', d => { hitResult = d; });
+
+  // Controller starts behind target (player side, +z) and punches forward (-z)
+  let cz = tz + 1.5;
+  engine.controllers[hand].pos = [cx, cy, cz];
+  engine.controllers[hand].prevPos = [cx, cy, cz];
+
+  for (let frame = 0; frame < 500 && !hitResult; frame++) {
+    cz -= step;
+    engine.controllers[hand].prevPos = engine.controllers[hand].pos.slice();
+    engine.controllers[hand].pos = [cx, cy, cz];
+
+    engine.updateControllerVelocities(dt);
+    for (let i = engine.targets.length - 1; i >= 0; i--) {
+      const t = engine.targets[i];
+      if (t.hit) { engine.targets.splice(i, 1); continue; }
+      engine.processCollision(t, i);
+    }
+  }
+  return hitResult;
+}
+
+let passed = 0, failed = 0;
+function assert(label, cond, detail = '') {
+  if (cond) { passed++; console.log(`  ✓ ${label}`); }
+  else { failed++; console.log(`  ✗ ${label}${detail ? ' — ' + detail : ''}`); }
+}
+
+// ════════════════════════════════════════════════
+// TEST 1: Head-on approach — should use closest-approach, not first-contact
+// ════════════════════════════════════════════════
 console.log('═══════════════════════════════════════════════════');
-console.log('TEST 1: Controller approaches target head-on');
+console.log('TEST 1: Head-on approach at 4 m/s (perfect aim)');
 console.log('═══════════════════════════════════════════════════');
 {
   const e = makeEngine();
   const tx = 0.3, ty = 1.3, tz = -0.2;
   placeTarget(e, tx, ty, tz, 1);
+  const r = simPunch(e, tx, ty, tz, 1, 4.0);
 
-  let hitResult = null;
-  e.on('hit', d => { hitResult = d; });
-
-  const speed = 4.0; // m/s approach speed
-  const dt = 1 / 72; // 72 Hz frame rate
-  const stepZ = -speed * dt;
-
-  // Controller starts behind target, moves toward it
-  let cz = tz - 1.5;
-  e.controllers[1].pos = [tx, ty, cz];
-  e.controllers[1].prevPos = [tx, ty, cz];
-
-  console.log(`  Target at z=${tz.toFixed(2)}, controller starts at z=${cz.toFixed(2)}`);
-  console.log(`  Speed: ${speed} m/s, dt: ${(dt*1000).toFixed(1)}ms, step: ${(Math.abs(stepZ)*100).toFixed(1)}cm/frame`);
-  console.log(`  HIT_DISTANCE: ${e.config.HIT_DISTANCE}m`);
-  console.log('');
-
-  for (let frame = 0; frame < 200 && !hitResult; frame++) {
-    cz -= stepZ; // controller moves in -z direction toward target
-    e.controllers[1].prevPos = e.controllers[1].pos.slice();
-    e.controllers[1].pos = [tx, ty, cz];
-    e.controllers[1].vel = [0, 0, -speed];
-
-    // Don't let engine spawn or move targets — we control everything
-    const savedTargets = e.targets.slice();
-    e.updateControllerVelocities(dt);
-    e.targets = savedTargets;
-    for (let i = e.targets.length - 1; i >= 0; i--) {
-      const t = e.targets[i];
-      if (t.hit) { e.targets.splice(i, 1); continue; }
-      e.processCollision(t, i);
-    }
-
-    const dist = Math.sqrt((tx - tx)**2 + (ty - ty)**2 + (cz - tz)**2);
-    if (frame < 5 || dist < 0.8) {
-      console.log(`  frame ${String(frame).padStart(3)}: ctrl_z=${cz.toFixed(3)}, dist=${dist.toFixed(3)}m${hitResult ? ' ← HIT' : ''}`);
-    }
-  }
-
-  if (hitResult) {
-    console.log('');
-    console.log(`  ✓ Hit registered at distance: ${hitResult.distance.toFixed(4)}m`);
-    console.log(`  ✓ Label: ${hitResult.result.label}, Score: ${hitResult.points}`);
-    console.log(`  ✓ Thresholds: PERFECT<${e.config.PERFECT_THRESHOLD} GREAT<${e.config.GREAT_THRESHOLD} GOOD<${e.config.GOOD_THRESHOLD} HIT<${e.config.HIT_DISTANCE}`);
-    console.log(`  → Distance ${hitResult.distance.toFixed(3)}m falls in: ${hitResult.result.label} range`);
-  } else {
-    console.log('  ✗ No hit registered!');
+  assert('Hit registered', !!r);
+  if (r) {
+    console.log(`    distance: ${r.distance.toFixed(4)}m, label: ${r.result.label}, score: ${r.points}`);
+    assert('Closest approach < GREAT threshold (0.15m)', r.distance < e.config.GREAT_THRESHOLD,
+      `got ${r.distance.toFixed(4)}m`);
+    assert('NOT WEAK', r.result.label !== 'WEAK', `got ${r.result.label}`);
   }
 }
 
-// ── Test 2: Various approach speeds ──
+// ════════════════════════════════════════════════
+// TEST 2: Various speeds — all should score well on direct hit
+// ════════════════════════════════════════════════
 console.log('');
 console.log('═══════════════════════════════════════════════════');
-console.log('TEST 2: Hit distance at various approach speeds');
+console.log('TEST 2: Direct hits at various speeds');
 console.log('═══════════════════════════════════════════════════');
 {
   const speeds = [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0];
   const fps = 72;
   const dt = 1 / fps;
 
-  console.log(`  ${'Speed'.padEnd(10)} ${'Step/frame'.padEnd(12)} ${'Hit dist'.padEnd(10)} ${'Label'.padEnd(10)} Score`);
+  console.log(`  ${'Speed'.padEnd(10)} ${'Step/frm'.padEnd(10)} ${'MinDist'.padEnd(10)} ${'Label'.padEnd(10)} Score`);
   console.log('  ' + '─'.repeat(55));
 
+  let allGoodOrBetter = true;
   for (const speed of speeds) {
     const e = makeEngine();
     const tx = 0.3, ty = 1.3, tz = -0.2;
     placeTarget(e, tx, ty, tz, 1);
+    const r = simPunch(e, tx, ty, tz, 1, speed);
 
-    let hitResult = null;
-    e.on('hit', d => { hitResult = d; });
-
-    let cz = tz - 1.5;
-    e.controllers[1].pos = [tx, ty, cz];
-    e.controllers[1].prevPos = [tx, ty, cz];
-
-    for (let frame = 0; frame < 500 && !hitResult; frame++) {
-      const stepZ = speed * dt;
-      cz += stepZ;
-      e.controllers[1].prevPos = e.controllers[1].pos.slice();
-      e.controllers[1].pos = [tx, ty, cz];
-      e.controllers[1].vel = [0, 0, -speed];
-
-      e.updateControllerVelocities(dt);
-      for (let i = e.targets.length - 1; i >= 0; i--) {
-        const t = e.targets[i];
-        if (t.hit) { e.targets.splice(i, 1); continue; }
-        e.processCollision(t, i);
-      }
-    }
-
-    if (hitResult) {
+    if (r) {
       const step = (speed * dt * 100).toFixed(1);
-      console.log(`  ${(speed+'m/s').padEnd(10)} ${(step+'cm').padEnd(12)} ${hitResult.distance.toFixed(4).padEnd(10)} ${hitResult.result.label.padEnd(10)} ${hitResult.points}`);
+      console.log(`  ${(speed+'m/s').padEnd(10)} ${(step+'cm').padEnd(10)} ${r.distance.toFixed(4).padEnd(10)} ${r.result.label.padEnd(10)} ${r.points}`);
+      if (r.result.label === 'WEAK') allGoodOrBetter = false;
+    } else {
+      console.log(`  ${(speed+'m/s').padEnd(10)} — NO HIT`);
+      allGoodOrBetter = false;
     }
   }
+  assert('All direct hits score GOOD or better', allGoodOrBetter);
 }
 
-// ── Test 3: Perfect alignment — controller placed exactly on target ──
+// ════════════════════════════════════════════════
+// TEST 3: Offset hit — controller passes 10cm off center
+// ════════════════════════════════════════════════
 console.log('');
 console.log('═══════════════════════════════════════════════════');
-console.log('TEST 3: Controller teleported to target center');
+console.log('TEST 3: Offset hit — 10cm off center');
 console.log('═══════════════════════════════════════════════════');
 {
   const e = makeEngine();
   const tx = 0.3, ty = 1.3, tz = -0.2;
   placeTarget(e, tx, ty, tz, 1);
+  const offset = 0.10;
+  const r = simPunch(e, tx + offset, ty, tz, 1, 4.0);
 
-  let hitResult = null;
-  e.on('hit', d => { hitResult = d; });
-
-  e.controllers[1].pos = [tx, ty, tz - 1.0];
-  e.controllers[1].prevPos = [tx, ty, tz - 1.0];
-  e.controllers[1].vel = [0, 0, -3];
-  e.updateControllerVelocities(1/72);
-
-  // Teleport to exact target center
-  e.controllers[1].prevPos = [tx, ty, tz - 0.05];
-  e.controllers[1].pos = [tx, ty, tz];
-  e.controllers[1].vel = [0, 0, -3];
-
-  for (let i = e.targets.length - 1; i >= 0; i--) {
-    const t = e.targets[i];
-    if (t.hit) { e.targets.splice(i, 1); continue; }
-    e.processCollision(t, i);
-  }
-
-  if (hitResult) {
-    console.log(`  Distance: ${hitResult.distance.toFixed(4)}m → ${hitResult.result.label} (${hitResult.points}pts)`);
-  } else {
-    console.log('  ✗ No hit');
+  assert('Hit registered', !!r);
+  if (r) {
+    console.log(`    distance: ${r.distance.toFixed(4)}m (offset=${offset}m)`);
+    assert('Min distance ≈ offset', Math.abs(r.distance - offset) < 0.02,
+      `expected ~${offset}, got ${r.distance.toFixed(4)}`);
+    assert('Label is GREAT or GOOD', r.result.label === 'GREAT' || r.result.label === 'GOOD',
+      `got ${r.result.label}`);
   }
 }
 
-// ── Test 4: Step-through problem — controller jumps past target ──
+// ════════════════════════════════════════════════
+// TEST 4: Large offset — 25cm, should be GOOD
+// ════════════════════════════════════════════════
 console.log('');
 console.log('═══════════════════════════════════════════════════');
-console.log('TEST 4: Tunneling — fast controller skips past target');
+console.log('TEST 4: Offset hit — 25cm off center');
 console.log('═══════════════════════════════════════════════════');
 {
   const e = makeEngine();
   const tx = 0.3, ty = 1.3, tz = -0.2;
   placeTarget(e, tx, ty, tz, 1);
+  const offset = 0.25;
+  const r = simPunch(e, tx + offset, ty, tz, 1, 4.0);
 
-  let hitResult = null;
-  e.on('hit', d => { hitResult = d; });
-
-  // Simulate very fast punch: 15 m/s at 72fps = 20.8cm/frame
-  // HIT_DISTANCE = 0.6m = 60cm. Still within range, should hit.
-  // But at 30m/s: 41.6cm/frame — could skip from outside to past center
-  const speed = 30;
-  const dt = 1/72;
-  const step = speed * dt;
-
-  e.controllers[1].pos = [tx, ty, tz - 0.7]; // just outside HIT_DISTANCE
-  e.controllers[1].prevPos = [tx, ty, tz - 0.7 - step];
-  e.controllers[1].vel = [0, 0, -speed];
-
-  // One frame later: jumped past
-  e.controllers[1].prevPos = e.controllers[1].pos.slice();
-  e.controllers[1].pos = [tx, ty, tz - 0.7 + step]; // now past target
-  e.controllers[1].vel = [0, 0, -speed];
-
-  for (let i = e.targets.length - 1; i >= 0; i--) {
-    const t = e.targets[i];
-    if (t.hit) { e.targets.splice(i, 1); continue; }
-    e.processCollision(t, i);
-  }
-
-  console.log(`  Speed: ${speed}m/s, step: ${(step*100).toFixed(1)}cm/frame`);
-  console.log(`  Controller jumped from z=${(tz-0.7).toFixed(2)} to z=${(tz-0.7+step).toFixed(2)}`);
-  if (hitResult) {
-    console.log(`  Hit: ${hitResult.distance.toFixed(3)}m → ${hitResult.result.label}`);
-  } else {
-    console.log('  ✗ MISS — tunneled through! (discrete check only sees one frame)');
+  assert('Hit registered', !!r);
+  if (r) {
+    console.log(`    distance: ${r.distance.toFixed(4)}m`);
+    assert('Min distance ≈ offset', Math.abs(r.distance - offset) < 0.02,
+      `expected ~${offset}, got ${r.distance.toFixed(4)}`);
+    assert('Label is GOOD', r.result.label === 'GOOD', `got ${r.result.label}`);
   }
 }
 
+// ════════════════════════════════════════════════
+// TEST 5: Slow drift (below MIN_PUNCH_VELOCITY) — should NOT score
+// ════════════════════════════════════════════════
 console.log('');
 console.log('═══════════════════════════════════════════════════');
-console.log('DIAGNOSIS');
+console.log('TEST 5: Slow drift through target (0.3 m/s)');
 console.log('═══════════════════════════════════════════════════');
-console.log('Discrete sphere-in-sphere fires on FIRST contact at the');
-console.log('sphere boundary (~0.6m). The fist never gets scored at');
-console.log('closer distances because the hit triggers immediately.');
-console.log('Result: everything is WEAK unless teleported to center.');
+{
+  const e = makeEngine();
+  const tx = 0.3, ty = 1.3, tz = -0.2;
+  placeTarget(e, tx, ty, tz, 1);
+  const r = simPunch(e, tx, ty, tz, 1, 0.3);
+
+  assert('No hit (drift filtered by velocity gate)', !r);
+}
+
+// ════════════════════════════════════════════════
+// TEST 6: Miss — controller passes far from target
+// ════════════════════════════════════════════════
+console.log('');
+console.log('═══════════════════════════════════════════════════');
+console.log('TEST 6: Complete miss — 1m offset');
+console.log('═══════════════════════════════════════════════════');
+{
+  const e = makeEngine();
+  const tx = 0.3, ty = 1.3, tz = -0.2;
+  placeTarget(e, tx, ty, tz, 1);
+  const r = simPunch(e, tx + 1.0, ty, tz, 1, 4.0);
+
+  assert('No hit (outside HIT_DISTANCE)', !r);
+}
+
+// ════════════════════════════════════════════════
+// SUMMARY
+// ════════════════════════════════════════════════
+console.log('');
+console.log('═══════════════════════════════════════════════════');
+console.log(`RESULT: ${passed} passed, ${failed} failed`);
+console.log('═══════════════════════════════════════════════════');
+process.exit(failed > 0 ? 1 : 0);
